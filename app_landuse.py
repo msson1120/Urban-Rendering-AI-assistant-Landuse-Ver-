@@ -443,6 +443,43 @@ def bytes_to_pil(b: bytes) -> Image.Image:
     return Image.open(BytesIO(b)).convert("RGB")
 
 # ──────────────────────────────────────────────────────────────
+# Dominant color 자동 추출 (k-means)
+# ──────────────────────────────────────────────────────────────
+def extract_dominant_colors(img_bytes: bytes, n_colors: int = 12) -> list:
+    """
+    k-means로 주요 색상 추출
+    반환: [(r, g, b, pixel_ratio), ...]  비율 높은 순
+    """
+    if not (CV2_AVAILABLE and np is not None):
+        return []
+    img = bytes_to_pil(img_bytes)
+    arr = np.array(img).reshape(-1, 3).astype(np.float32)
+
+    # 검정(배경) 제거
+    mask = ~((arr[:, 0] < 30) & (arr[:, 1] < 30) & (arr[:, 2] < 30))
+    arr = arr[mask]
+    if len(arr) < 100:
+        return []
+
+    # 흰색(도로선) 제거
+    mask2 = ~((arr[:, 0] > 240) & (arr[:, 1] > 240) & (arr[:, 2] > 240))
+    arr = arr[mask2]
+
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
+    _, labels, centers = cv2.kmeans(
+        arr, n_colors, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS
+    )
+    counts = np.bincount(labels.flatten())
+    total = counts.sum()
+    result = []
+    for idx in np.argsort(-counts):
+        r, g, b = int(centers[idx][0]), int(centers[idx][1]), int(centers[idx][2])
+        ratio = counts[idx] / total
+        if ratio > 0.005:  # 0.5% 이상만
+            result.append((r, g, b, float(ratio)))
+    return result
+
+# ──────────────────────────────────────────────────────────────
 # 핵심: RGB 기반 구역 마스크 추출
 # ──────────────────────────────────────────────────────────────
 def extract_zone_masks(landuse_bytes: bytes, table: list) -> dict:
@@ -838,6 +875,51 @@ if cur_step == 0:
 elif cur_step == 1:
     st.markdown('<div class="section-header">② 토지이용계획표</div>', unsafe_allow_html=True)
     st.caption("각 토지이용 항목의 RGB 색상, 면적, 프리셋을 설정하세요. 색상 허용오차(tolerance)를 조정해 추출 정확도를 높일 수 있습니다.")
+
+    # ── 색상 자동 추출 ──────────────────────────────────────
+    if st.session_state.img_landuse_bytes and CV2_AVAILABLE:
+        if st.button("🎨 이미지에서 색상 자동 추출"):
+            with st.spinner("색상 클러스터링 중..."):
+                colors = extract_dominant_colors(
+                    st.session_state.img_landuse_bytes, n_colors=12
+                )
+            st.session_state["_auto_colors"] = colors
+        colors = st.session_state.get("_auto_colors", [])
+        if colors:
+            st.markdown("**감지된 주요 색상 — 각 색상을 용도에 매핑하세요**")
+            new_rows = []
+            cols_per_row = 4
+            for i in range(0, len(colors), cols_per_row):
+                chunk = colors[i:i+cols_per_row]
+                ccols = st.columns(cols_per_row)
+                for j, (r, g, b, ratio) in enumerate(chunk):
+                    hex_c = f"#{r:02x}{g:02x}{b:02x}"
+                    with ccols[j]:
+                        st.markdown(
+                            f'<div style="background:{hex_c};height:40px;
+                            f'border-radius:6px;border:1px solid #ccc;"></div>',
+                            unsafe_allow_html=True
+                        )
+                        st.caption(f"RGB({r},{g},{b})\n{ratio*100:.1f}%")
+                        preset_sel = st.selectbox(
+                            "용도", ["(무시)"] + PRESET_KEYS,
+                            key=f"auto_preset_{i+j}"
+                        )
+                        if preset_sel != "(무시)":
+                            new_rows.append({
+                                "name": preset_sel,
+                                "r": r, "g": g, "b": b,
+                                "preset": preset_sel,
+                                "area_sqm": 10000.0,
+                                "tolerance": 20,
+                                "enabled": True,
+                            })
+            if st.button("➕ 선택 항목을 테이블에 추가", type="primary", key="apply_auto_colors"):
+                if new_rows:
+                    st.session_state.land_use_table = new_rows
+                    st.session_state["_auto_colors"] = []
+                    st.rerun()
+        st.markdown("---")
 
     # ── 행 추가 ──────────────────────────────────────────
     with st.expander("+ 항목 추가", expanded=False):
