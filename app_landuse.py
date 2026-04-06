@@ -382,7 +382,6 @@ def ensure_session():
     defs = {
         "step": 0,
         # 이미지
-        "img_topo_bytes": None,      # 수치지형도 (백판)
         "img_landuse_bytes": None,   # 토지이용계획도
         "img_sat_bytes": None,       # 위성사진
         # 토지이용계획표
@@ -397,8 +396,6 @@ def ensure_session():
         "pass2_output_bytes": None,
         "pass3_outputs": [],
         "pass3_selected_idx": 0,
-        # 복합 입력 이미지 (topo + landuse 합성)
-        "composite_input_bytes": None,
     }
     for k, v in defs.items():
         if k not in st.session_state:
@@ -803,26 +800,14 @@ st.markdown("""<div style="height:3px;background:linear-gradient(90deg,#2563EB,#
 if cur_step == 0:
     st.markdown('<div class="section-header">① 이미지 입력</div>', unsafe_allow_html=True)
 
-    col_topo, col_landuse, col_sat = st.columns(3, gap="medium")
-
-    with col_topo:
-        st.markdown("**수치지형도 (백판)**")
-        st.caption("지형·현황이 표시된 흑백 지형도 이미지")
-        f = st.file_uploader("수치지형도 업로드", type=["png","jpg","jpeg"], key="up_topo")
-        if f:
-            st.session_state.img_topo_bytes = f.getvalue()
-            st.session_state.composite_input_bytes = None  # 재생성 필요
-        if st.session_state.img_topo_bytes:
-            st.image(bytes_to_pil(st.session_state.img_topo_bytes),
-                     use_container_width=True, caption="수치지형도")
+    col_landuse, col_sat = st.columns(2, gap="large")
 
     with col_landuse:
         st.markdown("**토지이용계획도** ⭐ 필수")
-        st.caption("색상 구분된 토지이용계획 이미지")
+        st.caption("수치지형도 백판 위에 토지이용계획이 표시된 이미지")
         f2 = st.file_uploader("토지이용계획도 업로드", type=["png","jpg","jpeg"], key="up_landuse")
         if f2:
             st.session_state.img_landuse_bytes = f2.getvalue()
-            st.session_state.composite_input_bytes = None
         if st.session_state.img_landuse_bytes:
             st.image(bytes_to_pil(st.session_state.img_landuse_bytes),
                      use_container_width=True, caption="토지이용계획도")
@@ -837,32 +822,15 @@ if cur_step == 0:
             st.image(bytes_to_pil(st.session_state.img_sat_bytes),
                      use_container_width=True, caption="위성사진")
 
-    st.markdown('<div class="sub-label">계획부지 전체 면적</div>', unsafe_allow_html=True)
     st.session_state.site_area_sqm = st.number_input(
         "계획부지 전체면적 (㎡)", min_value=1.0,
         value=float(st.session_state.site_area_sqm), step=1000.0, format="%.0f"
     )
 
-    # 합성 이미지 미리보기
-    if st.session_state.img_topo_bytes and st.session_state.img_landuse_bytes:
-        st.markdown('<div class="sub-label">합성 입력 이미지 미리보기</div>', unsafe_allow_html=True)
-        alpha_val = st.slider("토지이용도 불투명도", 0.3, 0.8, 0.55, 0.05,
-                              help="낮을수록 지형도 강조 / 높을수록 토지이용도 강조")
-        if st.button("합성 이미지 생성"):
-            with st.spinner("합성 중..."):
-                composite = build_composite_input(
-                    st.session_state.img_topo_bytes,
-                    st.session_state.img_landuse_bytes, alpha=alpha_val
-                )
-                st.session_state.composite_input_bytes = composite
-        if st.session_state.composite_input_bytes:
-            st.image(bytes_to_pil(st.session_state.composite_input_bytes),
-                     caption="합성 입력 이미지 (PASS1 입력용)", use_container_width=True)
-
     if not st.session_state.img_landuse_bytes:
-        st.warning("토지이용계획도는 필수입니다. 업로드 후 다음 단계로 이동하세요.")
+        st.warning("토지이용계획도는 필수입니다.")
     else:
-        st.success("토지이용계획도 확인됨. '다음 ▶' 버튼으로 이동하세요.")
+        st.success("확인됨. '다음 ▶'으로 이동하세요.")
 
 # ══════════════════════════════════════════════════════════════
 # STEP 1: 토지이용계획표 입력
@@ -1018,29 +986,14 @@ else:
 
     # 사전 체크
     has_landuse = st.session_state.img_landuse_bytes is not None
-    has_composite = st.session_state.composite_input_bytes is not None
-    has_topo = st.session_state.img_topo_bytes is not None
 
     if not has_landuse:
         st.error("토지이용계획도가 없습니다. 이전 단계로 돌아가세요.")
         st.stop()
 
-    # 입력 이미지 결정: composite 우선, 없으면 topo, 없으면 landuse
-    if has_composite:
-        input_for_pass1 = st.session_state.composite_input_bytes
-        st.info("✅ PASS1 입력: 합성 이미지 (지형도+토지이용도)")
-    elif has_topo:
-        with st.spinner("합성 이미지 자동 생성 중..."):
-            composite = build_composite_input(
-                st.session_state.img_topo_bytes,
-                st.session_state.img_landuse_bytes, 0.55
-            )
-            st.session_state.composite_input_bytes = composite
-        input_for_pass1 = composite
-        st.info("✅ PASS1 입력: 합성 이미지 자동 생성됨")
-    else:
-        input_for_pass1 = st.session_state.img_landuse_bytes
-        st.info("ℹ️ PASS1 입력: 토지이용계획도 단독 (지형도 없음)")
+    # 입력 이미지 결정
+    input_for_pass1 = st.session_state.img_landuse_bytes
+    st.info("✅ PASS1 입력: 토지이용계획도")
 
     # 구역 마스크 추출
     table = st.session_state.land_use_table
