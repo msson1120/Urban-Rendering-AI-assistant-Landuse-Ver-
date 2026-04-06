@@ -423,6 +423,7 @@ def make_default_table():
             "name": n,
             "r": rgb[0], "g": rgb[1], "b": rgb[2],
             "preset": preset,
+            "custom_desc": "",
             "area_sqm": area,
             "tolerance": 35,
             "enabled": True,
@@ -649,7 +650,21 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
         if i not in zone_masks:
             continue
         zm = zone_masks[i]
-        preset_key = row.get("preset", "복합용지(혼합개발)")
+        preset_key = row.get("preset", "[직접입력]")
+        is_custom = (preset_key == "[직접입력]" or preset_key not in ZONE_PRESETS_SIMPLE)
+        custom_desc = row.get("custom_desc", "").strip()
+
+        if is_custom:
+            zone_name = row.get("name", f"Zone {i+1}")
+            r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
+            pos = describe_position(*zm["centroid"], *zm["img_size"])
+            user_area = row.get("area_sqm", 0)
+            desc = custom_desc if custom_desc else f"{zone_name} type facility"
+            line = (f"  [{zone_name}] Color:RGB({r},{g},{b}) | {pos} | ~{user_area:,.0f}㎡ | "
+                    f"{desc}")
+            lines.append(line)
+            continue
+
         preset = ZONE_PRESETS_SIMPLE.get(preset_key, ZONE_PRESETS_SIMPLE["복합용지(혼합개발)"])
         pf = preset.get("Primary Function", "Mixed urban fabric")
         is_park = (pf == PARK_PF)
@@ -716,7 +731,16 @@ def build_pass2_prompt(table: list, zone_masks: dict) -> str:
     for i, row in enumerate(table):
         if not row.get("enabled", True) or i not in zone_masks:
             continue
-        preset_key = row.get("preset", "복합용지(혼합개발)")
+        preset_key = row.get("preset", "[직접입력]")
+        is_custom = (preset_key == "[직접입력]" or preset_key not in ZONE_PRESETS_SIMPLE)
+        custom_desc = row.get("custom_desc", "").strip()
+
+        if is_custom:
+            r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
+            desc = custom_desc if custom_desc else f"{row.get('name','')} facility"
+            lines.append(f"  RGB({r},{g},{b}) [{row.get('name','')}]: {desc}")
+            continue
+
         preset = ZONE_PRESETS_SIMPLE.get(preset_key, {})
         facade_keys = preset.get("Primary Façade Material", ["glass"])
         facade = " + ".join(_FACADE_MAP.get(k, k) for k in facade_keys)
@@ -906,7 +930,8 @@ elif cur_step == 1:
                             new_rows.append({
                                 "name": preset_sel,
                                 "r": r, "g": g, "b": b,
-                                "preset": preset_sel,
+                                "preset": "[직접입력]",
+                                "custom_desc": "",
                                 "area_sqm": 10000.0,
                                 "tolerance": 20,
                                 "enabled": True,
@@ -983,13 +1008,24 @@ elif cur_step == 1:
                                                           float(row.get("area_sqm", 10000.0)),
                                                           step=500.0, key=f"area_{i}",
                                                           label_visibility="collapsed")
-            cur_preset = row.get("preset", PRESET_KEYS[0])
-            if cur_preset not in PRESET_KEYS:
-                cur_preset = PRESET_KEYS[0]
-            table[i]["preset"] = c_preset.selectbox("", PRESET_KEYS,
-                                                       index=PRESET_KEYS.index(cur_preset),
-                                                       key=f"preset_{i}",
-                                                       label_visibility="collapsed")
+            PRESET_OPTIONS = ["[직접입력]"] + PRESET_KEYS
+            cur_preset = row.get("preset", "[직접입력]")
+            if cur_preset not in PRESET_OPTIONS:
+                cur_preset = "[직접입력]"
+            table[i]["preset"] = c_preset.selectbox(
+                "", PRESET_OPTIONS,
+                index=PRESET_OPTIONS.index(cur_preset),
+                key=f"preset_{i}",
+                label_visibility="collapsed"
+            )
+            if table[i]["preset"] == "[직접입력]":
+                table[i]["custom_desc"] = st.text_input(
+                    "용도 설명 (영문 권장)",
+                    value=row.get("custom_desc", ""),
+                    key=f"custom_desc_{i}",
+                    placeholder="예: glamping resort with log cabins, 1~2F, natural wood facade",
+                    help="이 설명이 프롬프트에 직접 사용됩니다"
+                )
             # 색상 칩
             c_del.markdown(
                 f'<div style="margin-top:6px;width:28px;height:28px;border-radius:6px;'
