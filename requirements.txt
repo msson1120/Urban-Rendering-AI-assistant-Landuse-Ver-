@@ -1,0 +1,5 @@
+streamlit
+pillow
+google-genai
+numpy
+opencv-python-headless
