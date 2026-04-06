@@ -448,37 +448,61 @@ def bytes_to_pil(b: bytes) -> Image.Image:
 # ──────────────────────────────────────────────────────────────
 def extract_dominant_colors(img_bytes: bytes, n_colors: int = 12) -> list:
     """
-    k-means로 주요 색상 추출
-    반환: [(r, g, b, pixel_ratio), ...]  비율 높은 순
+    픽셀 빈도수 기반 주요 색상 추출 (벡터 도면에 최적)
+    k-means 대신 exact pixel counting 사용
     """
     if not (CV2_AVAILABLE and np is not None):
         return []
     img = bytes_to_pil(img_bytes)
-    arr = np.array(img).reshape(-1, 3).astype(np.float32)
+    arr = np.array(img).reshape(-1, 3)
 
-    # 검정(배경) 제거
-    mask = ~((arr[:, 0] < 30) & (arr[:, 1] < 30) & (arr[:, 2] < 30))
-    arr = arr[mask]
+    # 검정 배경 제거 (R+G+B < 60)
+    mask_black = arr.sum(axis=1) > 60
+    arr = arr[mask_black]
+
+    # 흰색·회백색 도로선 제거 (R,G,B 모두 230 이상)
+    mask_white = ~((arr[:, 0] > 230) & (arr[:, 1] > 230) & (arr[:, 2] > 230))
+    arr = arr[mask_white]
+
     if len(arr) < 100:
         return []
 
-    # 흰색(도로선) 제거
-    mask2 = ~((arr[:, 0] > 240) & (arr[:, 1] > 240) & (arr[:, 2] > 240))
-    arr = arr[mask2]
+    # 양자화: 4 단위로 반올림 → 미세 안티앨리어싱 노이즈 흡수
+    arr_q = (arr // 4 * 4).astype(np.int32)
 
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
-    _, labels, centers = cv2.kmeans(
-        arr, n_colors, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS
-    )
-    counts = np.bincount(labels.flatten())
-    total = counts.sum()
-    result = []
-    for idx in np.argsort(-counts):
-        r, g, b = int(centers[idx][0]), int(centers[idx][1]), int(centers[idx][2])
+    # 픽셀값 → 정수 키로 변환 후 빈도 계산
+    keys = arr_q[:, 0] * 65536 + arr_q[:, 1] * 256 + arr_q[:, 2]
+    unique, counts = np.unique(keys, return_counts=True)
+
+    # 빈도 높은 순 정렬
+    sorted_idx = np.argsort(-counts)
+    total = len(arr)
+
+    results = []
+    for idx in sorted_idx:
+        key = unique[idx]
+        b = int(key % 256)
+        g = int((key // 256) % 256)
+        r = int((key // 65536) % 256)
         ratio = counts[idx] / total
-        if ratio > 0.005:  # 0.5% 이상만
-            result.append((r, g, b, float(ratio)))
-    return result
+
+        if ratio < 0.005:  # 0.5% 미만 제외
+            break
+
+        # 기존 결과와 너무 가까운 색상 병합 (거리 30 이내)
+        too_close = False
+        for er, eg, eb, _ in results:
+            dist = abs(r-er) + abs(g-eg) + abs(b-eb)
+            if dist < 30:
+                too_close = True
+                break
+        if not too_close:
+            results.append((r, g, b, float(ratio)))
+
+        if len(results) >= n_colors:
+            break
+
+    return results
 
 # ──────────────────────────────────────────────────────────────
 # 핵심: RGB 기반 구역 마스크 추출
