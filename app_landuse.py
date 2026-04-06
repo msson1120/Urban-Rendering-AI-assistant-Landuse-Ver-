@@ -895,11 +895,8 @@ elif cur_step == 1:
                 for j, (r, g, b, ratio) in enumerate(chunk):
                     hex_c = f"#{r:02x}{g:02x}{b:02x}"
                     with ccols[j]:
-                        st.markdown(
-                            f'<div style="background:{hex_c};height:40px;
-                            f'border-radius:6px;border:1px solid #ccc;"></div>',
-                            unsafe_allow_html=True
-                        )
+                        div_html = f'<div style="background:{hex_c};height:40px;border-radius:6px;border:1px solid #ccc;"></div>'
+                        st.markdown(div_html, unsafe_allow_html=True)
                         st.caption(f"RGB({r},{g},{b})\n{ratio*100:.1f}%")
                         preset_sel = st.selectbox(
                             "용도", ["(무시)"] + PRESET_KEYS,
