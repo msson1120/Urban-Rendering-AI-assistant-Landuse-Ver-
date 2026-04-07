@@ -11,7 +11,7 @@ from copy import deepcopy
 from io import BytesIO
 
 import streamlit as st
-from PIL import Image, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter
 
 # ── 선택적 의존성 ──────────────────────────────────────────────
 GENAI_AVAILABLE = True
@@ -444,6 +444,74 @@ def bytes_to_pil(b: bytes) -> Image.Image:
     return Image.open(BytesIO(b)).convert("RGB")
 
 # ──────────────────────────────────────────────────────────────
+# 범례 이미지 생성
+# ──────────────────────────────────────────────────────────────
+def build_legend_image(table: list) -> bytes:
+    """
+    토지이용계획표 → 범례 이미지 자동 생성
+    정확한 RGB 색상 칩 + 용도명 + 설명
+    """
+    enabled = [row for row in table if row.get("enabled", True)]
+    if not enabled:
+        return None
+
+    chip_w, chip_h = 60, 36
+    row_h = chip_h + 14
+    padding = 16
+    text_x = chip_w + padding + 10
+    img_w = 520
+    img_h = padding * 2 + row_h * len(enabled)
+
+    img_h_full = img_h + 32
+    img2 = Image.new("RGB", (img_w, img_h_full), (255, 255, 255))
+    draw2 = ImageDraw.Draw(img2)
+    draw2.rectangle([0, 0, img_w, 32], fill=(30, 30, 30))
+    draw2.text((padding, 8), "LAND USE LEGEND", fill=(255, 255, 255))
+
+    for i, row in enumerate(enabled):
+        y = 32 + padding + i * row_h
+        r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
+
+        # 색상 칩 (테두리 포함)
+        draw2.rectangle(
+            [padding, y, padding + chip_w, y + chip_h],
+            fill=(r, g, b), outline=(80, 80, 80), width=1
+        )
+
+        # RGB 수치 (칩 아래 작게)
+        draw2.text(
+            (padding, y + chip_h + 1),
+            f"R{r} G{g} B{b}",
+            fill=(140, 140, 140)
+        )
+
+        # 용도명 및 설명
+        name = row.get("name", "")
+        preset = row.get("preset", "")
+        custom = row.get("custom_desc", "").strip()
+
+        if preset == "[직접입력]" and custom:
+            desc = custom[:55]
+        elif preset and preset != "[직접입력]":
+            p = ZONE_PRESETS_SIMPLE.get(preset, {})
+            pf = p.get("Primary Function", preset)
+            floors = FLOOR_MAP.get(p.get("floor_level", "Medium"), "4-8F")
+            desc = f"{pf} | {floors}"
+        else:
+            desc = name
+
+        draw2.text((text_x, y + 4), f"▶ {name}", fill=(20, 20, 20))
+        draw2.text((text_x, y + 20), desc[:58], fill=(90, 90, 90))
+
+        # 구분선
+        draw2.line(
+            [padding, y + row_h - 1, img_w - padding, y + row_h - 1],
+            fill=(230, 230, 230), width=1
+        )
+
+    return pil_to_png_bytes(img2)
+
+# ──────────────────────────────────────────────────────────────
 # Dominant color 자동 추출 (k-means)
 # ──────────────────────────────────────────────────────────────
 def extract_dominant_colors(img_bytes: bytes, n_colors: int = 12) -> list:
@@ -656,83 +724,54 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
     """토지이용계획표 → PASS1 프롬프트"""
     lines = []
 
-    # 1. 절대 제약
     lines += [
-        "TASK: Fill the colored zone areas with a top-down 2D urban masterplan layout.",
-        "Render each colored zone with architecture matching its land use type.",
-        "Preserve exact zone boundary geometry — do NOT redraw or merge zone areas.",
-        "NO text, labels, annotations, or numbers in the output.",
+        "You are given TWO images:",
+        "- Image 1: Land use plan map with colored zones.",
+        "- Image 2: Legend showing each color chip with its land use type and description.",
         "",
+        "TASK: Fill each colored zone in Image 1 with a top-down 2D urban masterplan layout.",
+        "Match each zone's color in Image 1 to the corresponding color chip in Image 2 legend.",
+        "Apply architecture, landscape, and road design matching the land use shown in the legend.",
+        "",
+        "RULES:",
+        "- Preserve exact zone boundary geometry — do NOT redraw or merge zones.",
+        "- NO text, labels, annotations in the output.",
+        "- Satellite/topographic context outside zone boundaries must remain UNCHANGED.",
+        f"- TOTAL SITE AREA: ~{site_area:,.0f}㎡. Scale all elements accordingly.",
+        "",
+        "ZONE DETAILS (supplement to legend — geometry and area info):",
     ]
 
-    # 2. 구역별 설명
-    lines.append("LAND USE ZONES (authoritative — fill each zone exactly as specified):")
     total_px = sum(v["area_px"] for v in zone_masks.values()) or 1
     for i, row in enumerate(table):
-        if not row.get("enabled", True):
-            continue
-        if i not in zone_masks:
+        if not row.get("enabled", True) or i not in zone_masks:
             continue
         zm = zone_masks[i]
-        preset_key = row.get("preset", "[직접입력]")
-        is_custom = (preset_key == "[직접입력]" or preset_key not in ZONE_PRESETS_SIMPLE)
-        custom_desc = row.get("custom_desc", "").strip()
-
-        if is_custom:
-            zone_name = row.get("name", f"Zone {i+1}")
-            r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
-            pos = describe_position(*zm["centroid"], *zm["img_size"])
-            user_area = row.get("area_sqm", 0)
-            desc = custom_desc if custom_desc else f"{zone_name} type facility"
-            line = (f"  [{zone_name}] Color:RGB({r},{g},{b}) | {pos} | ~{user_area:,.0f}㎡ | "
-                    f"{desc}")
-            lines.append(line)
-            continue
-
-        preset = ZONE_PRESETS_SIMPLE.get(preset_key, ZONE_PRESETS_SIMPLE["복합용지(혼합개발)"])
-        pf = preset.get("Primary Function", "Mixed urban fabric")
-        is_park = (pf == PARK_PF)
-        bcr = BCR_MAP.get(preset.get("bcr_level", "Medium"), "BCR 25-45%")
-        far = FAR_MAP.get(preset.get("far_level", "Medium"), "FAR 120-200%")
-        floors = FLOOR_MAP.get(preset.get("floor_level", "Medium"), "4-8F")
-        facade_keys = preset.get("Primary Façade Material", ["glass"])
-        facade = " + ".join(_FACADE_MAP.get(k, k) for k in facade_keys)
-        mass_raw = preset.get("mass_types", [])
-        mass = " + ".join(m.split("—")[0].strip() for m in mass_raw[:2]) if mass_raw else "mixed"
-        note = preset.get("prompt_note", "")
-        # 위치 설명
         w_img, h_img = zm["img_size"]
         cx, cy = zm["centroid"]
         pos = describe_position(cx, cy, w_img, h_img)
-        # 면적 비율
-        area_ratio = zm["area_px"] / total_px
         user_area = row.get("area_sqm", 0)
         r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
-        color_desc = f"RGB({r},{g},{b})"
-        zone_name = row.get("name", f"Zone {i+1}")
-        if is_park:
-            line = (f"  [{zone_name}] Color:{color_desc} | {pos} | ~{user_area:,.0f}㎡ | "
-                    f"Park/Open space — tree canopy, walking paths, NO buildings. "
-                    f"Landscape: {preset.get('Landscape Density Strategy','Park-heavy composition')}. {note}")
-        else:
-            height_s = preset.get("Height Strategy", "Stepped skyline")
-            line = (f"  [{zone_name}] Color:{color_desc} | {pos} | ~{user_area:,.0f}㎡ | "
-                    f"{pf} | {mass} | {height_s} | {bcr} | {far} | {floors} | "
-                    f"{facade} facade | {note}")
-        lines.append(line)
+        name = row.get("name", f"Zone {i+1}")
+        preset_key = row.get("preset", "[직접입력]")
+        is_park = False
+        if preset_key in ZONE_PRESETS_SIMPLE:
+            is_park = ZONE_PRESETS_SIMPLE[preset_key].get("Primary Function") == PARK_PF
+
+        park_note = " | NO buildings, open space only" if is_park else ""
+        lines.append(
+            f"  [{name}] color chip RGB({r},{g},{b}) | "
+            f"{pos} | ~{user_area:,.0f}㎡{park_note}"
+        )
 
     lines += [
-        "",
-        f"TOTAL SITE AREA: ~{site_area:,.0f}㎡. Scale all elements to fit this.",
         "",
         "OUTPUT STYLE (TOP-DOWN PLAN VIEW):",
         "Premium Korean urban development masterplan illustration.",
         "BUILDINGS: Many articulated footprints — L-shape, U-shape, courtyard, slab, podium.",
         "ROADS: Clear hierarchy — primary arterials, secondary collectors, local streets.",
-        "LANDSCAPE: Rich tree canopy, street trees, green buffers, pocket parks.",
-        "Each zone must be visually distinct — different color palette and building typology.",
-        "Fill all zones completely — no blank white areas.",
-        "Satellite/topographic context outside zone boundaries must remain UNCHANGED.",
+        "LANDSCAPE: Rich tree canopy, street trees, green buffers.",
+        "Each zone visually distinct per legend. Fill all zones — no blank white areas.",
     ]
     return "\n".join(lines).strip()
 
@@ -740,41 +779,20 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
 def build_pass2_prompt(table: list, zone_masks: dict) -> str:
     """PASS2: 2D → 3D 조감도"""
     lines = [
-        "You are given TWO reference images:",
-        "- Image 1 (land use plan): colored zone map showing exact zone boundaries and land use.",
-        "- Image 2 (2D masterplan): top-down layout with buildings, roads, landscape.",
+        "You are given THREE images:",
+        "- Image 1: Legend (color chip + land use type per zone).",
+        "- Image 2: 2D top-down masterplan layout.",
+        "- Image 3: Original land use plan map (zone boundary reference).",
         "",
         "TASK: Convert Image 2 into a photorealistic 3D archviz rendering.",
-        "- Use Image 1 to identify zone locations and apply correct facade materials per zone.",
-        "- Keep all roads, buildings, and open spaces exactly as in Image 2. Do NOT redesign.",
-        "- Maintain exact geographic extent — do NOT crop or zoom.",
-        "CAMERA: 45-55° oblique aerial view. Consistent across the entire image.",
-        "",
-        "ZONE MATERIALS (apply per zone area from Image 1):",
-    ]
-    for i, row in enumerate(table):
-        if not row.get("enabled", True) or i not in zone_masks:
-            continue
-        preset_key = row.get("preset", "[직접입력]")
-        is_custom = (preset_key == "[직접입력]" or preset_key not in ZONE_PRESETS_SIMPLE)
-        custom_desc = row.get("custom_desc", "").strip()
-
-        if is_custom:
-            r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
-            desc = custom_desc if custom_desc else f"{row.get('name','')} facility"
-            lines.append(f"  RGB({r},{g},{b}) [{row.get('name','')}]: {desc}")
-            continue
-
-        preset = ZONE_PRESETS_SIMPLE.get(preset_key, {})
-        facade_keys = preset.get("Primary Façade Material", ["glass"])
-        facade = " + ".join(_FACADE_MAP.get(k, k) for k in facade_keys)
-        floors = FLOOR_MAP.get(preset.get("floor_level", "Medium"), "4-8F")
-        r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
-        lines.append(f"  RGB({r},{g},{b}) [{row.get('name','')}]: {facade} buildings, {floors}")
-    lines += [
+        "- Match each zone's color in Image 3 to the legend in Image 1.",
+        "- Apply correct facade material and building height per zone from the legend.",
+        "- Keep all geometry exactly as in Image 2. Do NOT redesign.",
+        "- Maintain exact geographic extent. Do NOT crop or zoom.",
+        "CAMERA: 45-55° oblique aerial view.",
         "",
         FIXED_QUALITY_OBLIQUE,
-        "Negative: No text, labels. No white blank areas. No flat illustration style.",
+        "Negative: No text, labels. No white blank areas.",
     ]
     return "\n".join(lines).strip()
 
@@ -1134,6 +1152,17 @@ else:
     input_for_pass1 = st.session_state.img_landuse_bytes
     st.info("✅ PASS1 입력: 토지이용계획도")
 
+    # 범례 이미지 자동 생성
+    legend_bytes = build_legend_image(table)
+    if legend_bytes:
+        st.markdown('<div class="sub-label">자동 생성된 범례 이미지 (PASS1 입력용)</div>',
+                    unsafe_allow_html=True)
+        st.image(bytes_to_pil(legend_bytes),
+                 caption="Legend — 이 이미지가 모델에 함께 전달됩니다",
+                 use_container_width=False, width=400)
+    else:
+        st.warning("범례 이미지 생성 실패. 토지이용 항목을 확인하세요.")
+
     # 구역 마스크 추출
     table = st.session_state.land_use_table
     zone_masks = {}
@@ -1160,22 +1189,27 @@ else:
     def run_pass1():
         client = genai.Client(api_key=api_key)
         try:
+            # 입력: [토지이용계획도, 범례이미지]
+            images = [input_for_pass1]
+            if legend_bytes:
+                images.append(legend_bytes)
+
             resp = client.models.generate_content(
                 model=model_name,
-                contents=make_contents(pass1_prompt, [input_for_pass1])
+                contents=make_contents(pass1_prompt, images)
             )
             out = get_image_from_resp(resp)
             if out:
-                # site 외부 위성으로 교체
                 if st.session_state.img_sat_bytes and CV2_AVAILABLE:
                     site_mask, _ = extract_site_mask_from_landuse(
                         st.session_state.img_landuse_bytes, table
                     )
-                    out = apply_satellite_outside(st.session_state.img_sat_bytes, out, site_mask)
+                    out = apply_satellite_outside(
+                        st.session_state.img_sat_bytes, out, site_mask
+                    )
                 st.session_state.pass1_outputs.append(out)
                 st.session_state.pass1_selected_idx = len(st.session_state.pass1_outputs) - 1
                 st.session_state.pass1_output_bytes = out
-                # 하위 초기화
                 st.session_state.pass2_outputs = []
                 st.session_state.pass3_outputs = []
                 st.session_state.pass2_output_bytes = None
@@ -1222,15 +1256,16 @@ else:
     def run_pass2():
         client = genai.Client(api_key=api_key)
         try:
+            # 입력: [범례, PASS1결과, 토지이용계획도]
+            images = []
+            if legend_bytes:
+                images.append(legend_bytes)                          # Image 1: 범례
+            images.append(st.session_state.pass1_output_bytes)      # Image 2: 2D배치도
+            images.append(st.session_state.img_landuse_bytes)       # Image 3: 원본 구역도
+
             resp = client.models.generate_content(
                 model=model_name,
-                contents=make_contents(
-                    pass2_prompt,
-                    [
-                        st.session_state.img_landuse_bytes,   # Image 1: 토지이용계획도
-                        st.session_state.pass1_output_bytes,  # Image 2: PASS1 결과
-                    ]
-                )
+                contents=make_contents(pass2_prompt, images)
             )
             out = get_image_from_resp(resp)
             if out:
