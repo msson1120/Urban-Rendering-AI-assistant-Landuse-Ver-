@@ -960,6 +960,75 @@ elif cur_step == 1:
     st.caption("각 토지이용 항목의 RGB 색상, 면적, 프리셋을 설정하세요.")
     st.caption("⚠️ 자동 추출값은 참고용입니다. 정확한 RGB는 범례표를 보고 직접 수정하세요.")
 
+    # ── 엑셀 업로드 ──────────────────────────────────────────
+    with st.expander("📥 엑셀로 토지이용계획표 불러오기", expanded=False):
+        st.caption("컬럼 순서: 용도명 / R / G / B / 면적(㎡) / 용도설명(영문) / 프리셋(선택)")
+
+        if st.button("📄 템플릿 다운로드"):
+            import io as _io
+            try:
+                import openpyxl as _openpyxl
+                _wb = _openpyxl.Workbook()
+                _ws = _wb.active
+                _ws.title = "토지이용계획표"
+                _ws.append(["용도명", "R", "G", "B", "면적(㎡)", "용도설명(영문)", "프리셋"])
+                for _r in [
+                    ("단독주택", 255, 255, 127, 10000, "Low-rise detached housing, 2~3F, garden plots", "단독주택"),
+                    ("공원", 0, 165, 0, 15000, "Neighborhood park, tree canopy, walking paths", "근린공원·주제공원"),
+                    ("숙박시설", 255, 191, 127, 12000, "resort hotel with amenity facilities, 5~10F, warm facade", "[직접입력]"),
+                    ("치유의숲", 127, 255, 0, 20000, "healing forest with walking trails, meditation zones, no buildings", "[직접입력]"),
+                ]:
+                    _ws.append(_r)
+                _buf = _io.BytesIO()
+                _wb.save(_buf)
+                _buf.seek(0)
+                st.download_button(
+                    "⬇️ 템플릿 xlsx 다운로드",
+                    data=_buf.getvalue(),
+                    file_name="토지이용계획표_템플릿.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            except ImportError:
+                st.error("openpyxl 패키지가 필요합니다. pip install openpyxl")
+
+        xl_file = st.file_uploader("엑셀 파일 업로드 (.xlsx)", type=["xlsx"], key="xl_upload")
+        if xl_file and st.button("테이블에 적용", type="primary", key="apply_xl"):
+            try:
+                import openpyxl as _openpyxl
+                import io as _io
+                _wb = _openpyxl.load_workbook(_io.BytesIO(xl_file.getvalue()))
+                _ws = _wb.active
+                _new_rows = []
+                for _row in _ws.iter_rows(min_row=2, values_only=True):
+                    if not _row[0]:
+                        continue
+                    _name   = str(_row[0]).strip()
+                    _r      = max(0, min(255, int(_row[1] or 0)))
+                    _g      = max(0, min(255, int(_row[2] or 0)))
+                    _b      = max(0, min(255, int(_row[3] or 0)))
+                    _area   = float(_row[4] or 10000)
+                    _custom = str(_row[5] or "").strip()
+                    _preset = str(_row[6] or "[직접입력]").strip()
+                    if _preset not in PRESET_OPTIONS:
+                        _preset = "[직접입력]"
+                    _new_rows.append({
+                        "name": _name,
+                        "r": _r, "g": _g, "b": _b,
+                        "preset": _preset,
+                        "custom_desc": _custom,
+                        "area_sqm": _area,
+                        "tolerance": 25,
+                        "enabled": True,
+                    })
+                if _new_rows:
+                    st.session_state.land_use_table = _new_rows
+                    st.success("%d개 항목 불러옴" % len(_new_rows))
+                    st.rerun()
+                else:
+                    st.warning("불러온 데이터가 없습니다. 2행부터 데이터를 입력하세요.")
+            except Exception as _e:
+                st.error("엑셀 파일 오류: %s" % str(_e))
+
     # ── 색상 자동 추출 ──────────────────────────────────────
     if st.session_state.img_landuse_bytes and CV2_AVAILABLE:
         if st.button("🎨 이미지에서 색상 자동 추출"):
