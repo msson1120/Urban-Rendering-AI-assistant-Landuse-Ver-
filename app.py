@@ -771,28 +771,37 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
 
     lines += [
         "",
-        "GEOMETRY LOCK:",
-        "Preserve all zone boundaries and the site perimeter exactly.",
+        "GEOMETRY LOCK — NON-NEGOTIABLE:",
+        "Preserve ALL zone boundaries and the site perimeter EXACTLY.",
         "Insert content within the existing geometry. Never redesign or relocate boundaries.",
         "",
-        "OUTPUT STYLE:",
-        "Top-down 2D premium Korean urban masterplan board image.",
+        "OUTPUT STYLE — PREMIUM 2D MASTERPLAN:",
+        "Style: high-end Korean urban development competition board.",
+        "",
+        "COLOR PALETTE:",
+        "Residential zones: warm beige/cream buildings with grey rooftops.",
+        "Parks/green zones: rich dark green canopy over light green lawn.",
+        "Public facilities: terracotta/orange accent roofs.",
+        "Water bodies: vivid blue with subtle ripple texture.",
+        "Roads: light grey asphalt with white lane markings.",
         "",
         "BUILDINGS:",
-        "Show many individual building footprints with varied shapes and sizes.",
-        "Use articulated forms such as L-shape, U-shape, courtyard, slab bar, point tower, and podium combinations.",
-        "Apply realistic spacing and setbacks by zone type.",
-        "Avoid repetitive identical buildings.",
-        "",
-        "ROADS:",
-        "Strong hierarchy with clearly differentiated widths and surfaces.",
+        "Many varied footprints — L-shape, U-shape, courtyard, slab bar, point tower, podium.",
+        "Each block unique in shape and size. Realistic setbacks per zone.",
+        "Buildings cast soft drop shadows on the ground.",
+        "Roof surfaces show material texture — tile, concrete, green roof.",
         "",
         "LANDSCAPE:",
-        "Rich and layered landscape with tree clusters, street trees, central greens, and pocket parks.",
-        "Green and open-space zones must be fully filled with landscape elements, not left as flat color.",
+        "Lush layered vegetation: dark green tree canopies with circular shadow halos.",
+        "Light green lawns, scattered shrubs, flower beds in public spaces.",
+        "Street trees along all major roads.",
+        "Green zones fully filled — never left as flat solid color.",
+        "",
+        "ROADS:",
+        "Preserved exactly as in input. Add subtle curb lines and pedestrian markings.",
         "",
         "QUALITY:",
-        "High detail, crisp edges, clean block geometry.",
+        "Rich, dense, colorful. Competition-board quality. Crisp edges.",
         "No text, no labels, no zone markers, no annotation remnants.",
     ]
     return "\n".join(lines).strip()
@@ -1316,18 +1325,21 @@ else:
             )
             out = get_image_from_resp(resp)
             if out:
-                out = remove_white_lines(out)  # 경계선 제거
-                if st.session_state.img_sat_bytes and CV2_AVAILABLE:
+                out = remove_white_lines(out)
+                if CV2_AVAILABLE:
                     site_mask, _ = extract_site_mask_from_landuse(
                         st.session_state.img_landuse_bytes, table
                     )
-                    out = apply_satellite_outside(st.session_state.img_sat_bytes, out, site_mask)
-                elif CV2_AVAILABLE:
-                    # 위성 없으면 검정 배경만 흰색으로
-                    gen_arr = np.array(bytes_to_pil(out))
-                    black = gen_arr.sum(axis=2) < 30
-                    gen_arr[black] = [255, 255, 255]
-                    out = pil_to_png_bytes(Image.fromarray(gen_arr))
+                    if st.session_state.img_sat_bytes and site_mask is not None:
+                        # 위성사진 있으면 위성으로 외부 복원
+                        out = apply_satellite_outside(
+                            st.session_state.img_sat_bytes, out, site_mask
+                        )
+                    elif site_mask is not None:
+                        # 위성사진 없으면 토지이용계획도로 외부 복원
+                        out = apply_satellite_outside(
+                            st.session_state.img_landuse_bytes, out, site_mask
+                        )
                 st.session_state.pass1_outputs.append(out)
                 st.session_state.pass1_selected_idx = len(st.session_state.pass1_outputs) - 1
                 st.session_state.pass1_output_bytes = out
