@@ -1045,7 +1045,7 @@ else:
         st.stop()
 
     api_key = st.text_input("Google AI Studio API 키", type="password").strip()
-    model_name = "gemini-2.0-flash-preview-image-generation"
+    model_name = "gemini-3-pro-image-preview"
     st.caption("모델: %s" % model_name)
 
     # ── 공통 준비 ──────────────────────────────────────────
