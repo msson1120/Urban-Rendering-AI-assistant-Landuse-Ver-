@@ -1214,8 +1214,15 @@ else:
         st.stop()
 
     api_key = st.text_input("Google AI Studio API 키", type="password").strip()
-    model_name = "gemini-3-pro-image-preview"
-    st.caption("모델: %s" % model_name)
+    model_name = st.selectbox(
+        "모델 선택",
+        [
+            "gemini-3-pro-image-preview",
+            "gemini-3.1-flash-image-preview",
+        ],
+        index=1
+    )
+    st.caption("선택된 모델: %s" % model_name)
 
     # ── 공통 준비 ──────────────────────────────────────────
     table = st.session_state.land_use_table
@@ -1244,6 +1251,7 @@ else:
     if dev_pw == "126791":
         with st.expander("PASS1 프롬프트", expanded=False):
             st.code(pass1_prompt, language="text")
+            st.write("---- PROMPT LENGTH ----", len(pass1_prompt))
         with st.expander("PASS2 프롬프트", expanded=False):
             st.code(pass2_prompt, language="text")
         if legend_bytes:
@@ -1258,13 +1266,19 @@ else:
     def run_pass1():
         client = genai.Client(api_key=api_key)
         try:
-            # 범례 텍스트는 프롬프트에 포함됨 — 토지이용계획도 1장만
+            # PASS1은 반드시 단일 이미지만 사용
             resp = client.models.generate_content(
                 model=model_name,
                 contents=make_contents(pass1_prompt, [input_for_pass1])
             )
             out = get_image_from_resp(resp)
             if out:
+                out_img = bytes_to_pil(out)
+                st.caption(
+                    "[DEBUG] PASS1 model=%s / size=%dx%d" % (
+                        model_name, out_img.size[0], out_img.size[1]
+                    )
+                )
                 out = remove_white_lines(out)
                 if CV2_AVAILABLE:
                     site_mask, _ = extract_site_mask_from_landuse(
@@ -1311,6 +1325,15 @@ else:
     with p1c3:
         if st.session_state.pass1_outputs:
             st.caption("%d개 생성됨 (최대 5개)" % len(st.session_state.pass1_outputs))
+
+    if len(api_key) >= 10:
+        if st.button("모델 비교 테스트 (2회 연속 생성)", key="model_compare"):
+            st.session_state.pass1_outputs = []
+            st.session_state.pass1_selected_idx = 0
+            for _ in range(2):
+                with st.spinner("비교 생성 중 (%d/2)..." % (_ + 1)):
+                    run_pass1()
+            st.rerun()
 
     if st.session_state.pass1_outputs:
         st.markdown("**STEP 1 결과 — 최적 이미지 선택**")
