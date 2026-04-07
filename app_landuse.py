@@ -448,21 +448,24 @@ def build_legend_image(table: list):
         draw.text((padding, y + chip_h + 1), "R%d G%d B%d" % (r, g, b), fill=(140, 140, 140))
 
         name = row.get("name", "")
-        preset = row.get("preset", "")
+        preset_key = row.get("preset", "")
         custom = row.get("custom_desc", "").strip()
 
-        if preset == "[직접입력]" and custom:
-            desc = custom[:60]
-        elif preset and preset != "[직접입력]" and preset in ZONE_PRESETS_SIMPLE:
-            p = ZONE_PRESETS_SIMPLE[preset]
-            pf = p.get("Primary Function", preset)
-            floors = FLOOR_MAP.get(p.get("floor_level", "Medium"), "4-8F")
-            desc = "%s | %s" % (pf, floors)
+        # 영문 라벨 생성 — 한글 name 대신 영문 desc 우선 사용
+        if custom:
+            label_main = custom[:40]
+            label_sub = ""
+        elif preset_key in ZONE_PRESETS_SIMPLE:
+            p = ZONE_PRESETS_SIMPLE[preset_key]
+            label_main = p.get("Primary Function", preset_key)[:45]
+            label_sub = p.get("prompt_note", "")[:55]
         else:
-            desc = name
+            label_main = name[:45]  # 한글이라도 일단 출력
+            label_sub = ""
 
-        draw.text((text_x, y + 4), ">> %s" % name, fill=(20, 20, 20))
-        draw.text((text_x, y + 20), desc[:65], fill=(90, 90, 90))
+        draw.text((text_x, y + 4),  label_main, fill=(20, 20, 20))
+        if label_sub:
+            draw.text((text_x, y + 20), label_sub, fill=(90, 90, 90))
         draw.line([padding, y + row_h - 1, img_w - padding, y + row_h - 1],
                   fill=(230, 230, 230), width=1)
 
