@@ -677,28 +677,35 @@ def is_no_building_zone(desc: str) -> bool:
 
 
 def describe_color_name(r: int, g: int, b: int) -> str:
+    special = {
+        (150, 0, 200):   "deep purple",
+        (200, 0, 255):   "bright purple",
+        (255, 0, 255):   "magenta",
+        (0, 150, 0):     "dark green",
+        (0, 200, 0):     "bright green",
+        (100, 255, 100): "light green",
+        (50, 100, 50):   "forest green",
+        (100, 180, 80):  "olive green",
+        (255, 255, 0):   "bright yellow",
+        (255, 150, 0):   "orange",
+        (150, 100, 50):  "brown",
+        (0, 200, 255):   "cyan",
+        (100, 200, 255): "sky blue",
+        (0, 100, 255):   "blue",
+        (120, 120, 120): "grey",
+        (255, 255, 255): "white",
+        (0, 0, 0):       "black",
+    }
+    if (r, g, b) in special:
+        return special[(r, g, b)]
+
     candidates = [
-        ((255, 255, 255), "white"),
-        ((255, 255, 127), "light yellow"),
-        ((255, 230, 100), "warm yellow"),
-        ((255, 200, 150), "pale orange"),
-        ((255, 159, 127), "soft orange"),
-        ((255, 140, 140), "soft red"),
-        ((223, 127, 255), "bright purple"),
-        ((159, 127, 255), "lavender"),
-        ((165, 82, 124), "muted purple"),
-        ((255, 0, 255), "magenta"),
-        ((127, 191, 255), "sky blue"),
-        ((127, 223, 255), "light cyan"),
-        ((173, 241, 255), "light cyan"),
-        ((0, 165, 0), "dark green"),
-        ((191, 255, 127), "light green"),
-        ((127, 255, 0), "deep green"),
-        ((145, 165, 82), "olive green"),
-        ((103, 165, 82), "olive green"),
-        ((165, 124, 0), "warm brown"),
-        ((165, 82, 0), "brown"),
-        ((137, 137, 137), "grey"),
+        ((255, 255, 0),   "yellow"),
+        ((0, 180, 0),     "green"),
+        ((0, 180, 255),   "cyan"),
+        ((255, 0, 255),   "magenta"),
+        ((150, 100, 50),  "brown"),
+        ((120, 120, 120), "grey"),
     ]
     best_name = "colored"
     best_dist = 10**9
@@ -723,24 +730,47 @@ def make_clean_bg_like_landuse(landuse_bytes: bytes, site_mask) -> bytes:
         return landuse_bytes
 
 
-def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
+def build_white_mask_landuse_input(landuse_bytes: bytes, sat_bytes, site_mask) -> bytes:
+    """
+    PASS1 입력용:
+    - site 내부: 원래 토지이용 색상 유지
+    - site 외부: 흰색(white mask concept)
+    """
+    if not (CV2_AVAILABLE and np is not None) or site_mask is None:
+        return landuse_bytes
+    try:
+        land_arr = np.array(bytes_to_pil(landuse_bytes))
+        h, w = land_arr.shape[:2]
+        result = np.full((h, w, 3), 255, dtype=np.uint8)
+        result[site_mask > 0] = land_arr[site_mask > 0]
+        return pil_to_png_bytes(Image.fromarray(result))
+    except Exception:
+        return landuse_bytes
+
+(table: list, zone_masks: dict, site_area: float) -> str:
     lines = [
         "You are given ONE image.",
         "",
-        "This is a strict in-place rendering task.",
+        "SITE PERIMETER — NON-NEGOTIABLE:",
+        "- White region = development site boundary",
+        "- Render ONLY inside the white region",
+        "- Everything outside the white region must remain unchanged",
         "",
-        "CRITICAL:",
-        "The input image already defines the final layout.",
-        "All colored zones and roads are fixed geometry.",
-        "Do NOT redesign anything.",
+        "CRITICAL GEOMETRY LOCK:",
+        "- The input image already defines the final layout",
+        "- All colored zones and roads are fixed geometry",
+        "- This is not a concept redesign task",
+        "- Do not invent, rearrange, expand, simplify, or reinterpret the plan",
+        "- Do not create new blocks, new roads, or new open spaces",
+        "- The only allowed action is to render detailed contents inside the existing colored zones",
         "",
         "RULES (HIGHEST PRIORITY):",
         "- Preserve all zone boundaries exactly",
         "- Preserve all roads exactly",
         "- Do NOT modify geometry in any way",
         "- Only fill inside each colored zone",
-        "- Areas outside the site boundary must remain unchanged",
         "- No text or labels",
+        "- If a zone is open space, render landscape only and do not place buildings",
         "- TOTAL SITE AREA: ~%s sqm" % "{:,.0f}".format(site_area),
         "",
         "LAND USE (SECOND PRIORITY):",
@@ -756,9 +786,9 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
             continue
         seen_rgb.add((r, g, b))
 
-        # 도로는 별도 처리
-        if (r, g, b) == (255, 255, 255) or (r, g, b) == (0, 0, 0):
-            lines.append("RGB(%d,%d,%d) = road, keep unchanged" % (r, g, b))
+        # white / black road 계열
+        if (r, g, b) in {(255, 255, 255), (0, 0, 0)}:
+            lines.append("RGB(%d,%d,%d) | Road network | fixed road geometry | keep unchanged" % (r, g, b))
             continue
 
         preset_key = row.get("preset", "[직접입력]")
@@ -784,48 +814,68 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
 
         color_name = describe_color_name(r, g, b)
 
-        # 색 이름 직접 보정
-        if (r, g, b) == (150, 0, 200):
-            color_name = "deep purple"
-        elif (r, g, b) == (200, 0, 255):
-            color_name = "bright purple"
-        elif (r, g, b) == (255, 0, 255):
-            color_name = "magenta"
-        elif (r, g, b) == (0, 150, 0):
-            color_name = "dark green"
-        elif (r, g, b) == (0, 200, 0):
-            color_name = "bright green"
-        elif (r, g, b) == (100, 255, 100):
-            color_name = "light green"
-        elif (r, g, b) == (50, 100, 50):
-            color_name = "forest green"
-        elif (r, g, b) == (100, 180, 80):
-            color_name = "olive green"
-        elif (r, g, b) == (255, 255, 0):
-            color_name = "bright yellow"
-        elif (r, g, b) == (255, 150, 0):
-            color_name = "orange"
-        elif (r, g, b) == (0, 200, 255):
-            color_name = "cyan"
-        elif (r, g, b) == (100, 200, 255):
-            color_name = "sky blue"
-        elif (r, g, b) == (0, 100, 255):
-            color_name = "blue"
-        elif (r, g, b) == (120, 120, 120):
-            color_name = "grey"
+        # 용도별 character intent 보강
+        extra = ""
 
-        lines.append("RGB(%d,%d,%d) = %s zone, %s" % (r, g, b, color_name, desc))
+        if "단독주택" in name:
+            extra = " | Residential - Detached housing | low-rise | BCR 20–40% | FAR 80–120% | 2–3F | garden plots | street trees"
+        elif "콘도미니엄" in name:
+            extra = " | Resort condominium | mid-rise | BCR 25–45% | FAR 120–220% | 4–8F | leisure landscape"
+        elif "공원" in name and "골프" not in name and "마을" not in name:
+            extra = " | Public park | no buildings | dense trees | lawn | walking paths"
+        elif "마을공원" in name:
+            extra = " | Neighborhood park | no buildings | trees | seating | pocket open space"
+        elif "녹지" in name:
+            extra = " | Green buffer | no buildings | natural vegetation"
+        elif "치유의숲" in name:
+            extra = " | Healing forest | no buildings | forest trails | meditation spaces"
+        elif "파크골프" in name:
+            extra = " | Park golf course | no buildings | open grass field"
+        elif "저류지" in name:
+            extra = " | Retention basin | no buildings | water surface | landscape edge"
+        elif "주차장" in name:
+            extra = " | Parking area | paved surface | structured layout"
+        elif "복합커뮤니티" in name:
+            extra = " | Community complex | mid-rise | BCR 30–50% | FAR 100–180% | 2–5F | civic plaza"
+        elif "주민편의" in name:
+            extra = " | Local mixed-use | low-rise | BCR 30–50% | FAR 80–150% | 2–4F | neighborhood frontage"
+        elif "6차산업" in name:
+            extra = " | Agri-processing complex | low-rise cluster | productive landscape"
+        elif "스마트팜" in name:
+            extra = " | Smart farm | greenhouse clusters | agricultural facilities"
+        elif "파머스마켓" in name:
+            extra = " | Farmers market | stalls and small pavilions | active public space"
+        elif "보행자전용" in name:
+            extra = " | Pedestrian street | paving | no vehicles"
+        elif "산책로" in name:
+            extra = " | Walking trail | landscape path | no buildings"
+
+        if extra:
+            lines.append("RGB(%d,%d,%d) | %s zone%s" % (r, g, b, color_name, extra))
+        else:
+            lines.append("RGB(%d,%d,%d) | %s zone | %s" % (r, g, b, color_name, desc))
 
     lines += [
         "",
-        "IMPORTANT:",
-        "Each zone must be visually different according to its function.",
-        "Do NOT treat all zones as housing.",
+        "TASK:",
+        "Fill the white site region with a top-down 2D masterplan layout.",
         "",
-        "STYLE (LOW PRIORITY):",
-        "Top-down 2D masterplan.",
-        "Clean, detailed, realistic landscape and buildings.",
-        "No cartoon style.",
+        "OUTPUT STYLE (LOW PRIORITY):",
+        "- Premium Korean urban development masterplan illustration",
+        "- Fill the entire site completely — no empty areas",
+        "",
+        "BUILDINGS:",
+        "- Many individual building footprints",
+        "- Use articulated shapes: L-shape, U-shape, courtyard, slab, podium",
+        "- Realistic spacing and setbacks per zone type",
+        "",
+        "ROADS:",
+        "- Strong road hierarchy — primary, secondary, local access roads clearly differentiated",
+        "",
+        "LANDSCAPE:",
+        "- Rich and layered — tree canopy clusters, street trees, central greens, pocket parks",
+        "- Each zone must have visually distinct character matching its assigned program",
+        "- High visual density. No large empty areas",
     ]
 
     return "\n".join(lines).strip()
@@ -1245,8 +1295,24 @@ else:
 
     # ── 공통 준비 ──────────────────────────────────────────
     table = st.session_state.land_use_table
-    input_for_pass1 = st.session_state.img_landuse_bytes
-    st.info("PASS1 입력: 토지이용계획도")
+
+    pass1_site_mask = None
+    if CV2_AVAILABLE:
+        pass1_site_mask, _ = extract_site_mask_from_landuse(st.session_state.img_landuse_bytes, table)
+
+    if pass1_site_mask is not None:
+        input_for_pass1 = build_white_mask_landuse_input(
+            st.session_state.img_landuse_bytes,
+            st.session_state.img_sat_bytes,
+            pass1_site_mask
+        )
+        st.info("PASS1 입력: white mask 기반 토지이용계획도")
+    else:
+        input_for_pass1 = st.session_state.img_landuse_bytes
+        st.info("PASS1 입력: 토지이용계획도")
+
+    with st.expander("PASS1 입력 이미지 미리보기", expanded=False):
+        st.image(bytes_to_pil(input_for_pass1), use_container_width=True)
 
     # 범례 이미지 — UI 미리보기 전용 (API 입력에는 사용 안 함)
     legend_bytes = build_legend_image(table)
