@@ -672,6 +672,39 @@ FIXED_QUALITY_OBLIQUE = (
 
 SKIP_COLORS = {(255, 255, 255)}  # 도로(흰색)는 zone 채우기 대상 아니므로 제외
 
+def simplify_zone_desc(desc: str) -> str:
+    d = (desc or "").strip()
+    replacements = [
+        ("public park with dense trees, walking paths, open lawn", "public park, dense trees, lawn, no buildings"),
+        ("green buffer zone with natural vegetation, no buildings", "green buffer zone, natural vegetation, no buildings"),
+        ("low-rise detached housing, 2~3F, private gardens", "detached housing, 2~3F, private gardens"),
+        ("small neighborhood park, trees and seating areas", "neighborhood park, trees and seating, no buildings"),
+        ("outdoor performance plaza, stage and open gathering space", "performance plaza, stage and open space"),
+        ("pedestrian street, paving, no vehicles", "pedestrian street, paving, no vehicles"),
+        ("community complex with cultural and welfare facilities, 2~5F", "community complex, 2~5F buildings"),
+        ("walking trail through green landscape, natural path", "walking trail network, integrated with landscape, no buildings"),
+        ("smart farm with greenhouse structures and agricultural facilities", "smart farm, greenhouse clusters"),
+        ("infinity pool with leisure deck, resort-style design", "infinity pool, leisure deck, no buildings"),
+        ("stormwater retention basin, water surface and landscape edges", "retention basin, water surface, landscape edges, no buildings"),
+        ("local convenience facilities, small-scale mixed use buildings", "local mixed-use buildings, small scale"),
+        ("parking lot or parking structure, organized layout", "parking area, structured layout"),
+        ("healing forest with trails and meditation zones, no buildings", "healing forest, trails and meditation zones, no buildings"),
+        ("resort condominium, mid-rise, leisure-oriented design", "resort condominium, mid-rise buildings"),
+        ("open-air farmers market, stalls and small pavilions", "farmers market, stalls and small pavilions"),
+        ("park golf course, open grass field with light facilities", "park golf course, open grass field, no buildings"),
+        ("agri-processing and rural experience complex, low-rise cluster", "agri-processing complex, low-rise cluster"),
+    ]
+    for old, new in replacements:
+        if d == old:
+            return new
+    return d
+
+def is_no_building_zone(desc: str) -> bool:
+    d = (desc or "").lower()
+    keywords = ["park", "green buffer", "trail", "retention basin",
+                "healing forest", "golf course", "pool", "no buildings"]
+    return any(k in d for k in keywords)
+
 def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
     lines = [
         "You are given ONE image: a land use plan map with colored zones.",
@@ -681,9 +714,11 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
         "",
         "RULES:",
         "- Preserve exact zone boundary geometry. Do NOT redraw or merge zones.",
-        "- NO text, labels, or annotations in the output.",
-        "- Areas outside all colored zones must remain UNCHANGED.",
-        "- White areas RGB(255,255,255) = roads/paths — do NOT fill, keep as circulation space.",
+        "- No text, labels, or annotations in the output.",
+        "- Areas outside all colored zones must remain unchanged.",
+        "- White areas RGB(255,255,255) = roads/paths — keep unchanged.",
+        "- Every zone must be fully filled with detailed elements. No empty areas.",
+        "- Avoid repetitive identical buildings. Each block should have varied building shapes and sizes.",
         "- TOTAL SITE AREA: ~%s sqm. Scale all elements accordingly." % "{:,.0f}".format(site_area),
         "",
         "LAND USE ZONES:",
@@ -712,25 +747,12 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
         else:
             desc = name
 
-        is_park = (
-            preset_key in ZONE_PRESETS_SIMPLE and
-            ZONE_PRESETS_SIMPLE[preset_key].get("Primary Function") == PARK_PF
-        )
-        park_note = " | NO buildings" if is_park else ""
-
-        # 위치 정보 (마스크 있을 때만)
-        pos_str = ""
-        area_str = ""
-        if i in zone_masks:
-            zm = zone_masks[i]
-            cx, cy = zm["centroid"]
-            pos_str = " | " + describe_position(cx, cy, *zm["img_size"])
-        user_area = row.get("area_sqm", 0)
-        if user_area > 0:
-            area_str = " | ~%s sqm" % "{:,.0f}".format(user_area)
+        desc = simplify_zone_desc(desc)
+        if is_no_building_zone(desc) and "no buildings" not in desc.lower():
+            desc = desc + ", no buildings"
 
         lines.append(
-            "  RGB(%d,%d,%d) = %s%s%s%s" % (r, g, b, desc, park_note, pos_str, area_str)
+            "  RGB(%d,%d,%d) = %s" % (r, g, b, desc)
         )
 
     lines += [
@@ -744,12 +766,11 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
         "BUILDINGS: Show MANY individual building footprints. Use articulated shapes:",
         "L-shape, U-shape, courtyard, slab bar, point tower, podium combinations.",
         "Realistic spacing and setbacks per zone type.",
+        "Avoid repetitive identical buildings. Each block should have varied building shapes and sizes.",
         "ROADS: Strong road hierarchy — primary roads (wide), secondary streets, local access lanes.",
         "Road surfaces must be clearly differentiated in color and width.",
         "LANDSCAPE: Rich and layered — tree canopy clusters, street trees, central greens, pocket parks.",
-        "Green zones must be fully filled with vegetation, NOT left as flat color.",
-        "DENSITY: High visual density. Every part of every zone meaningfully designed.",
-        "No large blank or flat-color leftovers inside any zone.",
+        "Green and open-space zones must be fully filled with landscape elements, not left as flat color.",
         "QUALITY: 4K-level perceived detail. Crisp edges, clean block geometry.",
         "No text, no labels, no zone markers, no annotation remnants in output.",
     ]
