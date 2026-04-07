@@ -620,13 +620,10 @@ FIXED_QUALITY_OBLIQUE = (
 
 def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
     lines = [
-        "You are given TWO images:",
-        "- Image 1: Land use plan map with colored zones.",
-        "- Image 2: Legend — each row shows a color chip with land use type and description.",
+        "You are given ONE image: a land use plan map with colored zones.",
         "",
-        "TASK: Fill each colored zone in Image 1 with a top-down 2D urban masterplan layout.",
-        "Match each zone color in Image 1 to the corresponding color chip in Image 2 legend.",
-        "Apply architecture, roads, and landscape matching the land use shown in the legend.",
+        "TASK: Fill each colored zone with a top-down 2D urban masterplan layout.",
+        "Match each zone color to the legend below and apply appropriate architecture.",
         "",
         "RULES:",
         "- Preserve exact zone boundary geometry. Do NOT redraw or merge zones.",
@@ -634,9 +631,38 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
         "- Areas outside all colored zones must remain UNCHANGED.",
         "- TOTAL SITE AREA: ~%s sqm. Scale all elements accordingly." % "{:,.0f}".format(site_area),
         "",
-        "ZONE SUPPLEMENT (position and area info to help locate each zone):",
+        "LAND USE LEGEND:",
     ]
 
+    # 범례 텍스트로 삽입
+    for i, row in enumerate(table):
+        if not row.get("enabled", True):
+            continue
+        r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
+        name = row.get("name", "")
+        preset_key = row.get("preset", "[직접입력]")
+        custom = row.get("custom_desc", "").strip()
+
+        if custom:
+            desc = custom
+        elif preset_key in ZONE_PRESETS_SIMPLE:
+            p = ZONE_PRESETS_SIMPLE[preset_key]
+            desc = p.get("prompt_note", p.get("Primary Function", ""))
+        else:
+            desc = name
+
+        is_park = (
+            preset_key in ZONE_PRESETS_SIMPLE and
+            ZONE_PRESETS_SIMPLE[preset_key].get("Primary Function") == PARK_PF
+        )
+        park_note = " | NO buildings" if is_park else ""
+        lines.append(
+            "  RGB(%d,%d,%d) = %s%s" % (r, g, b, desc, park_note)
+        )
+
+    lines += ["", "ZONE POSITIONS:"]
+
+    # 위치 정보
     for i, row in enumerate(table):
         if not row.get("enabled", True) or i not in zone_masks:
             continue
@@ -646,16 +672,9 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
         pos = describe_position(cx, cy, w_img, h_img)
         user_area = row.get("area_sqm", 0)
         r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
-        name = row.get("name", "Zone %d" % (i + 1))
-        preset_key = row.get("preset", "[직접입력]")
-        is_park = (
-            preset_key in ZONE_PRESETS_SIMPLE and
-            ZONE_PRESETS_SIMPLE[preset_key].get("Primary Function") == PARK_PF
-        )
-        park_note = " | NO buildings — open space only" if is_park else ""
         lines.append(
-            "  [%s] legend color RGB(%d,%d,%d) | %s | ~%s sqm%s"
-            % (name, r, g, b, pos, "{:,.0f}".format(user_area), park_note)
+            "  RGB(%d,%d,%d) | %s | ~%s sqm"
+            % (r, g, b, pos, "{:,.0f}".format(user_area))
         )
 
     lines += [
@@ -665,28 +684,45 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
         "BUILDINGS: Many articulated footprints — L-shape, U-shape, courtyard, slab, podium.",
         "ROADS: Clear hierarchy — primary arterials, secondary collectors, local streets.",
         "LANDSCAPE: Rich tree canopy, street trees, green buffers, pocket parks.",
-        "Each zone must be visually distinct. Fill all zones completely — no blank areas.",
+        "Each zone must be visually distinct. Fill all zones completely.",
     ]
     return "\n".join(lines).strip()
 
 
-def build_pass2_prompt() -> str:
+def build_pass2_prompt(table: list) -> str:
     lines = [
-        "You are given THREE images:",
-        "- Image 1: Legend (color chip + land use type and description per zone).",
-        "- Image 2: 2D top-down masterplan layout to convert.",
-        "- Image 3: Original land use plan map (zone color reference).",
+        "You are given TWO images:",
+        "- Image 1: 2D top-down masterplan layout to convert.",
+        "- Image 2: Original land use plan map (zone color reference).",
         "",
-        "TASK: Convert Image 2 into a photorealistic 3D archviz rendering.",
-        "- Use Image 1 legend to identify land use per zone.",
-        "- Use Image 3 to locate each zone by matching colors to the legend.",
-        "- Apply correct facade material and building height per zone from the legend.",
-        "- Keep all building positions, roads, and open spaces exactly as in Image 2.",
+        "TASK: Convert Image 1 into a photorealistic 3D archviz rendering.",
+        "Apply facade materials and building heights per zone using the legend below.",
+        "",
+        "LAND USE LEGEND:",
+    ]
+    for row in table:
+        if not row.get("enabled", True):
+            continue
+        r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
+        preset_key = row.get("preset", "[직접입력]")
+        custom = row.get("custom_desc", "").strip()
+        if custom:
+            desc = custom[:80]
+        elif preset_key in ZONE_PRESETS_SIMPLE:
+            p = ZONE_PRESETS_SIMPLE[preset_key]
+            desc = p.get("prompt_note", "")
+        else:
+            desc = row.get("name", "")
+        lines.append("  RGB(%d,%d,%d) = %s" % (r, g, b, desc))
+
+    lines += [
+        "",
+        "- Keep all geometry exactly as in Image 1. Do NOT redesign.",
         "- Maintain exact geographic extent. Do NOT crop or zoom.",
-        "CAMERA: 45-55 degree oblique aerial view, consistent across entire image.",
+        "CAMERA: 45-55 degree oblique aerial view.",
         "",
         FIXED_QUALITY_OBLIQUE,
-        "Negative: No text, no labels. No white blank areas. No flat illustration style.",
+        "Negative: No text, no labels. No white blank areas.",
     ]
     return "\n".join(lines).strip()
 
@@ -1053,15 +1089,13 @@ else:
     input_for_pass1 = st.session_state.img_landuse_bytes
     st.info("PASS1 입력: 토지이용계획도")
 
-    # 범례 이미지 자동 생성
+    # 범례 이미지 — UI 미리보기 전용 (API 입력에는 사용 안 함)
     legend_bytes = build_legend_image(table)
     if legend_bytes:
-        st.markdown('<div class="sub-label">자동 생성 범례 이미지 (모델에 함께 전달)</div>',
+        st.markdown('<div class="sub-label">범례 이미지 미리보기 (UI 확인용)</div>',
                     unsafe_allow_html=True)
         st.image(bytes_to_pil(legend_bytes), width=420,
-                 caption="범례 이미지 — 색상 칩과 용도 설명 포함")
-    else:
-        st.warning("범례 이미지 생성 실패. 토지이용 항목을 확인하세요.")
+                 caption="범례 이미지 — 프롬프트 텍스트로 모델에 전달됩니다")
 
     # 구역 마스크 (위치 정보용)
     zone_masks = {}
@@ -1070,7 +1104,7 @@ else:
 
     # 프롬프트
     pass1_prompt = build_pass1_prompt(table, zone_masks, st.session_state.site_area_sqm)
-    pass2_prompt = build_pass2_prompt()
+    pass2_prompt = build_pass2_prompt(table)
 
     # 개발자 확인
     dev_pw = st.text_input("개발자 비밀번호", type="password", key="dev_pw")
@@ -1091,12 +1125,10 @@ else:
     def run_pass1():
         client = genai.Client(api_key=api_key)
         try:
-            images = [input_for_pass1]
-            if legend_bytes:
-                images.append(legend_bytes)
+            # 범례 텍스트는 프롬프트에 포함됨 — 토지이용계획도 1장만
             resp = client.models.generate_content(
                 model=model_name,
-                contents=make_contents(pass1_prompt, images)
+                contents=make_contents(pass1_prompt, [input_for_pass1])
             )
             out = get_image_from_resp(resp)
             if out:
@@ -1154,11 +1186,10 @@ else:
     def run_pass2():
         client = genai.Client(api_key=api_key)
         try:
-            images = []
-            if legend_bytes:
-                images.append(legend_bytes)                       # Image 1: 범례
-            images.append(st.session_state.pass1_output_bytes)   # Image 2: 2D 배치도
-            images.append(st.session_state.img_landuse_bytes)    # Image 3: 원본 토지이용도
+            images = [
+                st.session_state.pass1_output_bytes,   # Image 1: 2D 배치도
+                st.session_state.img_landuse_bytes,    # Image 2: 원본 토지이용도
+            ]
             resp = client.models.generate_content(
                 model=model_name,
                 contents=make_contents(pass2_prompt, images)
