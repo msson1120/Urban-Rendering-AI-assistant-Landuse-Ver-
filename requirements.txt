@@ -3,4 +3,3 @@ Pillow
 google-genai
 opencv-python-headless
 numpy
-openpyxl
