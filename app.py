@@ -747,7 +747,7 @@ def build_white_mask_landuse_input(landuse_bytes, sat_bytes, site_mask):
     except Exception:
         return landuse_bytes
 
-(table: list, zone_masks: dict, site_area: float) -> str:
+def build_pass1_prompt(table, zone_masks, site_area):
     lines = [
         "You are given ONE image.",
         "",
