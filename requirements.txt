@@ -1,5 +1,6 @@
 streamlit
-pillow
+Pillow
 google-genai
+opencv-python
 numpy
-opencv-python-headless
+openpyxl
