@@ -721,6 +721,20 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
         "- Avoid repetitive identical buildings. Each block should have varied building shapes and sizes.",
         "- TOTAL SITE AREA: ~%s sqm. Scale all elements accordingly." % "{:,.0f}".format(site_area),
         "",
+        "CRITICAL GEOMETRY CONSTRAINT:",
+        "- This is NOT a redesign task.",
+        "- Do NOT change, simplify, smooth, or reinterpret any boundaries.",
+        "- Do NOT create new roads or modify existing road alignment.",
+        "- All geometry must remain pixel-identical to the input.",
+        "- Only fill inside each colored zone.",
+        "",
+        "ROAD LOCK:",
+        "- White areas (RGB 255,255,255) are fixed roads.",
+        "- Do NOT modify, redraw, or replace them in any way.",
+        "",
+        "DENSITY ENFORCEMENT:",
+        "- Every zone MUST be fully filled. Empty or flat color areas are NOT allowed.",
+        "",
         "LAND USE ZONES:",
     ]
 
@@ -748,7 +762,7 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
             desc = name
 
         desc = simplify_zone_desc(desc)
-        if is_no_building_zone(desc) and "no buildings" not in desc.lower():
+        if is_no_building_zone(desc) and "parking" not in desc.lower() and "no buildings" not in desc.lower():
             desc = desc + ", no buildings"
 
         lines.append(
@@ -757,22 +771,29 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
 
     lines += [
         "",
-        "GEOMETRY LOCK — NON-NEGOTIABLE:",
-        "Preserve ALL uploaded zone boundaries, parcel lines, and site perimeter EXACTLY.",
+        "GEOMETRY LOCK:",
+        "Preserve all zone boundaries and the site perimeter exactly.",
         "Insert content within the existing geometry. Never redesign or relocate boundaries.",
         "",
-        "OUTPUT STYLE — TOP-DOWN 2D PLAN VIEW:",
-        "Render as a premium Korean urban development masterplan board image.",
-        "BUILDINGS: Show MANY individual building footprints. Use articulated shapes:",
-        "L-shape, U-shape, courtyard, slab bar, point tower, podium combinations.",
-        "Realistic spacing and setbacks per zone type.",
-        "Avoid repetitive identical buildings. Each block should have varied building shapes and sizes.",
-        "ROADS: Strong road hierarchy — primary roads (wide), secondary streets, local access lanes.",
-        "Road surfaces must be clearly differentiated in color and width.",
-        "LANDSCAPE: Rich and layered — tree canopy clusters, street trees, central greens, pocket parks.",
+        "OUTPUT STYLE:",
+        "Top-down 2D premium Korean urban masterplan board image.",
+        "",
+        "BUILDINGS:",
+        "Show many individual building footprints with varied shapes and sizes.",
+        "Use articulated forms such as L-shape, U-shape, courtyard, slab bar, point tower, and podium combinations.",
+        "Apply realistic spacing and setbacks by zone type.",
+        "Avoid repetitive identical buildings.",
+        "",
+        "ROADS:",
+        "Strong hierarchy with clearly differentiated widths and surfaces.",
+        "",
+        "LANDSCAPE:",
+        "Rich and layered landscape with tree clusters, street trees, central greens, and pocket parks.",
         "Green and open-space zones must be fully filled with landscape elements, not left as flat color.",
-        "QUALITY: 4K-level perceived detail. Crisp edges, clean block geometry.",
-        "No text, no labels, no zone markers, no annotation remnants in output.",
+        "",
+        "QUALITY:",
+        "High detail, crisp edges, clean block geometry.",
+        "No text, no labels, no zone markers, no annotation remnants.",
     ]
     return "\n".join(lines).strip()
 
