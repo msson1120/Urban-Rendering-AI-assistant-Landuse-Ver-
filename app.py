@@ -725,29 +725,25 @@ def make_clean_bg_like_landuse(landuse_bytes: bytes, site_mask) -> bytes:
 
 def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
     lines = [
-        "You are given ONE image:",
-        "Image 1 is the final land use plan geometry.",
+        "You are given ONE image.",
         "",
-        "TASK:",
         "This is a strict in-place rendering task.",
-        "Render the input image as a premium top-down 2D masterplan illustration without changing its layout.",
-        "Do not redesign the plan. Only fill inside each colored zone.",
-        "The input image already defines the final site layout, road network, and zone geometry.",
         "",
-        "HARD CONSTRAINTS:",
-        "- The input image already contains the final layout.",
-        "- Treat each colored zone as a fixed mask.",
-        "- Preserve all zone boundaries exactly.",
-        "- Preserve all white roads exactly.",
-        "- Do not move, redraw, widen, narrow, or recreate roads.",
-        "- Do not simplify, smooth, or reinterpret any geometry.",
-        "- Areas outside the site boundary must remain unchanged.",
-        "- No text, labels, or annotations.",
-        "- Every zone must be fully filled with detailed content.",
-        "- Avoid repetitive identical buildings.",
-        "- TOTAL SITE AREA: ~%s sqm." % "{:,.0f}".format(site_area),
+        "CRITICAL:",
+        "The input image already defines the final layout.",
+        "All colored zones and roads are fixed geometry.",
+        "Do NOT redesign anything.",
         "",
-        "LAND USE COLOR MEANINGS:",
+        "RULES (HIGHEST PRIORITY):",
+        "- Preserve all zone boundaries exactly",
+        "- Preserve all roads exactly",
+        "- Do NOT modify geometry in any way",
+        "- Only fill inside each colored zone",
+        "- Areas outside the site boundary must remain unchanged",
+        "- No text or labels",
+        "- TOTAL SITE AREA: ~%s sqm" % "{:,.0f}".format(site_area),
+        "",
+        "LAND USE (SECOND PRIORITY):",
     ]
 
     seen_rgb = set()
@@ -756,11 +752,14 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
             continue
 
         r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
-        if (r, g, b) in SKIP_COLORS:
-            continue
         if (r, g, b) in seen_rgb:
             continue
         seen_rgb.add((r, g, b))
+
+        # 도로는 별도 처리
+        if (r, g, b) == (255, 255, 255) or (r, g, b) == (0, 0, 0):
+            lines.append("RGB(%d,%d,%d) = road, keep unchanged" % (r, g, b))
+            continue
 
         preset_key = row.get("preset", "[직접입력]")
         custom = row.get("custom_desc", "").strip()
@@ -784,31 +783,51 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
             desc += ", no buildings"
 
         color_name = describe_color_name(r, g, b)
+
+        # 색 이름 직접 보정
+        if (r, g, b) == (150, 0, 200):
+            color_name = "deep purple"
+        elif (r, g, b) == (200, 0, 255):
+            color_name = "bright purple"
+        elif (r, g, b) == (255, 0, 255):
+            color_name = "magenta"
+        elif (r, g, b) == (0, 150, 0):
+            color_name = "dark green"
+        elif (r, g, b) == (0, 200, 0):
+            color_name = "bright green"
+        elif (r, g, b) == (100, 255, 100):
+            color_name = "light green"
+        elif (r, g, b) == (50, 100, 50):
+            color_name = "forest green"
+        elif (r, g, b) == (100, 180, 80):
+            color_name = "olive green"
+        elif (r, g, b) == (255, 255, 0):
+            color_name = "bright yellow"
+        elif (r, g, b) == (255, 150, 0):
+            color_name = "orange"
+        elif (r, g, b) == (0, 200, 255):
+            color_name = "cyan"
+        elif (r, g, b) == (100, 200, 255):
+            color_name = "sky blue"
+        elif (r, g, b) == (0, 100, 255):
+            color_name = "blue"
+        elif (r, g, b) == (120, 120, 120):
+            color_name = "grey"
+
         lines.append("RGB(%d,%d,%d) = %s zone, %s" % (r, g, b, color_name, desc))
 
     lines += [
         "",
-        "RENDER STYLE:",
-        "Premium Korean urban masterplan board image.",
-        "Top-down 2D illustration.",
-        "Rich detail, crisp edges, realistic landscape layering.",
-        "No cartoon simplification.",
-        "No zone color leftovers.",
+        "IMPORTANT:",
+        "Each zone must be visually different according to its function.",
+        "Do NOT treat all zones as housing.",
         "",
-        "BUILDINGS:",
-        "Use varied building footprints appropriate to each zone type.",
-        "Use articulated forms such as L-shape, U-shape, courtyard, slab bar, point tower, and podium combinations.",
-        "Apply realistic spacing and setbacks by zone type.",
-        "Do not alter the block structure or road-defined parcel geometry.",
-        "",
-        "LANDSCAPE:",
-        "Rich and layered landscape with tree clusters, street trees, central greens, and pocket parks.",
-        "Green and open-space zones must be fully filled with landscape elements, not left as flat color.",
-        "",
-        "QUALITY:",
-        "High detail, crisp clean edges, dense composition.",
-        "No text, no labels, no annotation remnants.",
+        "STYLE (LOW PRIORITY):",
+        "Top-down 2D masterplan.",
+        "Clean, detailed, realistic landscape and buildings.",
+        "No cartoon style.",
     ]
+
     return "\n".join(lines).strip()
 
 
