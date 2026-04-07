@@ -598,25 +598,79 @@ def apply_satellite_outside(sat_bytes: bytes, generated_bytes: bytes, site_mask)
         gen_arr = np.array(gen_r)
         sat_arr = np.array(sat)
         mask_r = cv2.resize(site_mask, (w_sat, h_sat), interpolation=cv2.INTER_NEAREST)
+
+        # 추가: 생성 이미지에서 검정 픽셀도 외부로 처리
+        black_pixels = (gen_arr.sum(axis=2) < 30)
         result = gen_arr.copy()
         result[mask_r == 0] = sat_arr[mask_r == 0]
+        result[black_pixels] = sat_arr[black_pixels]  # 검정 배경 → 위성으로 교체
         return pil_to_png_bytes(Image.fromarray(result))
     except Exception:
         return generated_bytes
 
 # ──────────────────────────────────────────────────────────────
+# 흰색 구역 경계선 제거
+# ──────────────────────────────────────────────────────────────
+def remove_white_lines(img_bytes: bytes) -> bytes:
+    """생성 이미지의 흰색 구역 경계선 제거"""
+    if not (CV2_AVAILABLE and np is not None):
+        return img_bytes
+    try:
+        arr = np.array(bytes_to_pil(img_bytes))
+        bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        _, white = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY)
+        num, lbl, stats, _ = cv2.connectedComponentsWithStats(white, connectivity=8)
+        line_mask = np.zeros_like(white)
+        for i in range(1, num):
+            area = stats[i, cv2.CC_STAT_AREA]
+            bw = stats[i, cv2.CC_STAT_WIDTH]
+            bh = stats[i, cv2.CC_STAT_HEIGHT]
+            if area < 5000 and (bw < 15 or bh < 15):
+                line_mask[lbl == i] = 255
+        if np.sum(line_mask) < 10:
+            return img_bytes
+        dilated = cv2.dilate(line_mask, np.ones((3, 3), np.uint8), iterations=1)
+        result = cv2.inpaint(bgr, dilated, 4, cv2.INPAINT_TELEA)
+        return pil_to_png_bytes(Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB)))
+    except Exception:
+        return img_bytes
+
+# ──────────────────────────────────────────────────────────────
 # 프롬프트 빌더
 # ──────────────────────────────────────────────────────────────
 FIXED_QUALITY_OBLIQUE = (
-    "RENDER QUALITY — PHOTOREALISTIC:\n"
-    "Lighting: Late-afternoon golden-hour sun, low angle. Strong directional shadows. "
-    "Warm orange-gold on sunlit faces. Cool blue-grey in shadows. Filmic HDR.\n"
-    "Glass: Fresnel reflections, sky color reflected, sharp sun glints on curtain walls.\n"
-    "Brick/concrete: Visible mortar joints, surface grain, shadow lines under overhangs.\n"
-    "Vegetation: 3D volumetric tree canopies, translucent leaf edges, cast shadows.\n"
-    "Roads: Asphalt texture, curb shadow lines, sidewalk paving patterns.\n"
-    "No blur, no cartoon shading, no flat uniform colors. Photorealistic throughout.\n"
+    "RENDER QUALITY — PHOTOREALISTIC (competition-grade archviz):\n"
+    "\n"
+    "Lighting:\n"
+    "- Late-afternoon golden-hour sun at low angle. Strong directional shadows across facades and rooftops.\n"
+    "- Warm orange-gold on sunlit faces. Cool blue-grey in shadow areas. High contrast, filmic.\n"
+    "- Soft bounce light filling shadows. Ambient occlusion at ground contacts.\n"
+    "\n"
+    "Glass / windows:\n"
+    "- Fresnel reflections: bright at edges, semi-transparent at center.\n"
+    "- Sky color and surroundings reflected in glass surfaces.\n"
+    "- Sharp sun glints on window frames and curtain wall edges.\n"
+    "- Every window must look like real glass — NO flat colored rectangles.\n"
+    "\n"
+    "Brick / concrete facades:\n"
+    "- Visible mortar joints, surface grain, micro-weathering.\n"
+    "- Sharp shadow lines under overhangs, balconies, cornices.\n"
+    "- Flat roofs: concrete texture, parapet shadow lines visible.\n"
+    "\n"
+    "Vegetation:\n"
+    "- 3D volumetric tree canopies. Light passes through leaf edges.\n"
+    "- Distinct tree crown shapes. Shadow cast on ground and adjacent surfaces.\n"
+    "- Ground cover: grass texture, gravel, paving patterns — not flat green fills.\n"
+    "\n"
+    "Roads / ground:\n"
+    "- Asphalt texture with fine grain. Curb edges casting thin shadow lines.\n"
+    "- Sidewalk paving pattern visible. Crosswalk markings where appropriate.\n"
+    "\n"
+    "Overall: no blur, no cartoon shading, no flat uniform colors. Every pixel physically grounded.\n"
 )
+
+SKIP_COLORS = {(255, 255, 255)}  # 도로(흰색)는 zone 채우기 대상 아니므로 제외
 
 def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
     lines = [
@@ -631,17 +685,23 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
         "- Areas outside all colored zones must remain UNCHANGED.",
         "- TOTAL SITE AREA: ~%s sqm. Scale all elements accordingly." % "{:,.0f}".format(site_area),
         "",
-        "LAND USE LEGEND:",
+        "LAND USE ZONES:",
     ]
 
-    # 범례 텍스트로 삽입
+    seen_rgb = set()
     for i, row in enumerate(table):
         if not row.get("enabled", True):
             continue
         r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
-        name = row.get("name", "")
+        if (r, g, b) in SKIP_COLORS:
+            continue
+        if (r, g, b) in seen_rgb:
+            continue
+        seen_rgb.add((r, g, b))
+
         preset_key = row.get("preset", "[직접입력]")
         custom = row.get("custom_desc", "").strip()
+        name = row.get("name", "")
 
         if custom:
             desc = custom
@@ -656,35 +716,41 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
             ZONE_PRESETS_SIMPLE[preset_key].get("Primary Function") == PARK_PF
         )
         park_note = " | NO buildings" if is_park else ""
-        lines.append(
-            "  RGB(%d,%d,%d) = %s%s" % (r, g, b, desc, park_note)
-        )
 
-    lines += ["", "ZONE POSITIONS:"]
-
-    # 위치 정보
-    for i, row in enumerate(table):
-        if not row.get("enabled", True) or i not in zone_masks:
-            continue
-        zm = zone_masks[i]
-        cx, cy = zm["centroid"]
-        w_img, h_img = zm["img_size"]
-        pos = describe_position(cx, cy, w_img, h_img)
+        # 위치 정보 (마스크 있을 때만)
+        pos_str = ""
+        area_str = ""
+        if i in zone_masks:
+            zm = zone_masks[i]
+            cx, cy = zm["centroid"]
+            pos_str = " | " + describe_position(cx, cy, *zm["img_size"])
         user_area = row.get("area_sqm", 0)
-        r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
+        if user_area > 0:
+            area_str = " | ~%s sqm" % "{:,.0f}".format(user_area)
+
         lines.append(
-            "  RGB(%d,%d,%d) | %s | ~%s sqm"
-            % (r, g, b, pos, "{:,.0f}".format(user_area))
+            "  RGB(%d,%d,%d) = %s%s%s%s" % (r, g, b, desc, park_note, pos_str, area_str)
         )
 
     lines += [
         "",
+        "GEOMETRY LOCK — NON-NEGOTIABLE:",
+        "Preserve ALL uploaded zone boundaries, parcel lines, and site perimeter EXACTLY.",
+        "Insert content within the existing geometry. Never redesign or relocate boundaries.",
+        "",
         "OUTPUT STYLE — TOP-DOWN 2D PLAN VIEW:",
-        "Premium Korean urban development masterplan illustration.",
-        "BUILDINGS: Many articulated footprints — L-shape, U-shape, courtyard, slab, podium.",
-        "ROADS: Clear hierarchy — primary arterials, secondary collectors, local streets.",
-        "LANDSCAPE: Rich tree canopy, street trees, green buffers, pocket parks.",
-        "Each zone must be visually distinct. Fill all zones completely.",
+        "Render as a premium Korean urban development masterplan board image.",
+        "BUILDINGS: Show MANY individual building footprints. Use articulated shapes:",
+        "L-shape, U-shape, courtyard, slab bar, point tower, podium combinations.",
+        "Realistic spacing and setbacks per zone type.",
+        "ROADS: Strong road hierarchy — primary roads (wide), secondary streets, local access lanes.",
+        "Road surfaces must be clearly differentiated in color and width.",
+        "LANDSCAPE: Rich and layered — tree canopy clusters, street trees, central greens, pocket parks.",
+        "Green zones must be fully filled with vegetation, NOT left as flat color.",
+        "DENSITY: High visual density. Every part of every zone meaningfully designed.",
+        "No large blank or flat-color leftovers inside any zone.",
+        "QUALITY: 4K-level perceived detail. Crisp edges, clean block geometry.",
+        "No text, no labels, no zone markers, no annotation remnants in output.",
     ]
     return "\n".join(lines).strip()
 
@@ -700,10 +766,16 @@ def build_pass2_prompt(table: list) -> str:
         "",
         "LAND USE LEGEND:",
     ]
+    seen_rgb = set()
     for row in table:
         if not row.get("enabled", True):
             continue
         r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
+        if (r, g, b) in SKIP_COLORS:
+            continue
+        if (r, g, b) in seen_rgb:
+            continue
+        seen_rgb.add((r, g, b))
         preset_key = row.get("preset", "[직접입력]")
         custom = row.get("custom_desc", "").strip()
         if custom:
@@ -1132,11 +1204,18 @@ else:
             )
             out = get_image_from_resp(resp)
             if out:
+                out = remove_white_lines(out)  # 경계선 제거
                 if st.session_state.img_sat_bytes and CV2_AVAILABLE:
                     site_mask, _ = extract_site_mask_from_landuse(
                         st.session_state.img_landuse_bytes, table
                     )
                     out = apply_satellite_outside(st.session_state.img_sat_bytes, out, site_mask)
+                elif CV2_AVAILABLE:
+                    # 위성 없으면 검정 배경만 흰색으로
+                    gen_arr = np.array(bytes_to_pil(out))
+                    black = gen_arr.sum(axis=2) < 30
+                    gen_arr[black] = [255, 255, 255]
+                    out = pil_to_png_bytes(Image.fromarray(gen_arr))
                 st.session_state.pass1_outputs.append(out)
                 st.session_state.pass1_selected_idx = len(st.session_state.pass1_outputs) - 1
                 st.session_state.pass1_output_bytes = out
