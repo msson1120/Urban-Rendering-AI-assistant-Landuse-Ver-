@@ -707,102 +707,52 @@ def is_no_building_zone(desc: str) -> bool:
 
 def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
     lines = [
-        "You are given ONE image: a land use plan map with colored zones.",
+        "You are given TWO images:",
+        "- Image 1: A land use plan map with colored zones. THIS is what you must render.",
+        "- Image 2: A legend showing color chips with land use descriptions. Use as REFERENCE ONLY. Do NOT render or reproduce Image 2.",
         "",
-        "TASK: Fill each colored zone with a top-down 2D urban masterplan layout.",
-        "Match each zone color to the legend below and apply appropriate architecture.",
+        "TASK:",
+        "Transform Image 1 into a premium top-down 2D urban masterplan illustration.",
+        "Fill each colored zone in Image 1 with detailed architectural content.",
+        "Refer to Image 2 to understand what each color zone represents.",
         "",
-        "RULES:",
-        "- Preserve exact zone boundary geometry. Do NOT redraw or merge zones.",
-        "- No text, labels, or annotations in the output.",
-        "- Areas outside all colored zones must remain unchanged.",
-        "- White areas RGB(255,255,255) = roads/paths — keep unchanged.",
-        "- Every zone must be fully filled with detailed elements. No empty areas.",
-        "- Avoid repetitive identical buildings. Each block should have varied building shapes and sizes.",
-        "- TOTAL SITE AREA: ~%s sqm. Scale all elements accordingly." % "{:,.0f}".format(site_area),
-        "",
-        "CRITICAL GEOMETRY CONSTRAINT:",
-        "- This is NOT a redesign task.",
-        "- Do NOT change, simplify, smooth, or reinterpret any boundaries.",
-        "- Do NOT create new roads or modify existing road alignment.",
-        "- All geometry must remain pixel-identical to the input.",
-        "- Only fill inside each colored zone.",
-        "",
-        "ROAD LOCK:",
-        "- White areas (RGB 255,255,255) are fixed roads.",
-        "- Do NOT modify, redraw, or replace them in any way.",
-        "",
-        "DENSITY ENFORCEMENT:",
-        "- Every zone MUST be fully filled. Empty or flat color areas are NOT allowed.",
-        "",
-        "LAND USE ZONES:",
-    ]
-
-    seen_rgb = set()
-    for i, row in enumerate(table):
-        if not row.get("enabled", True):
-            continue
-        r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
-        if (r, g, b) in SKIP_COLORS:
-            continue
-        if (r, g, b) in seen_rgb:
-            continue
-        seen_rgb.add((r, g, b))
-
-        preset_key = row.get("preset", "[직접입력]")
-        custom = row.get("custom_desc", "").strip()
-        name = row.get("name", "")
-
-        if custom:
-            desc = custom
-        elif preset_key in ZONE_PRESETS_SIMPLE:
-            p = ZONE_PRESETS_SIMPLE[preset_key]
-            desc = p.get("prompt_note", p.get("Primary Function", ""))
-        else:
-            desc = name
-
-        desc = simplify_zone_desc(desc)
-        if is_no_building_zone(desc) and "parking" not in desc.lower() and "no buildings" not in desc.lower():
-            desc = desc + ", no buildings"
-
-        lines.append(
-            "  RGB(%d,%d,%d) = %s" % (r, g, b, desc)
-        )
-
-    lines += [
-        "",
-        "GEOMETRY LOCK — NON-NEGOTIABLE:",
-        "Preserve ALL zone boundaries and the site perimeter EXACTLY.",
-        "Insert content within the existing geometry. Never redesign or relocate boundaries.",
+        "ABSOLUTE RULES:",
+        "- Render ONLY Image 1. Image 2 is reference only.",
+        "- Preserve all zone boundaries and road lines exactly as shown in Image 1.",
+        "- White roads in Image 1 must remain visible and unchanged.",
+        "- Areas outside the site boundary must remain UNCHANGED.",
+        "- NO text, labels, or annotations in the output.",
+        "- Every zone must be fully filled. No flat color or empty areas.",
+        "- TOTAL SITE AREA: ~%s sqm." % "{:,.0f}".format(site_area),
         "",
         "OUTPUT STYLE — PREMIUM 2D MASTERPLAN:",
         "Style: high-end Korean urban development competition board.",
+        "Match the quality of a professional architectural visualization firm.",
         "",
         "COLOR PALETTE:",
-        "Residential zones: warm beige/cream buildings with grey rooftops.",
-        "Parks/green zones: rich dark green canopy over light green lawn.",
-        "Public facilities: terracotta/orange accent roofs.",
-        "Water bodies: vivid blue with subtle ripple texture.",
-        "Roads: light grey asphalt with white lane markings.",
+        "Residential: warm beige/cream buildings, grey slate rooftops, soft drop shadows.",
+        "Parks/green zones: rich dark green canopy, light green lawn, circular tree shadows.",
+        "Public facilities: terracotta/orange accent roofs, civic plazas.",
+        "Water: vivid blue-green with subtle ripple texture.",
+        "Roads: light warm grey asphalt, white lane markings, curb lines.",
         "",
         "BUILDINGS:",
         "Many varied footprints — L-shape, U-shape, courtyard, slab bar, point tower, podium.",
-        "Each block unique in shape and size. Realistic setbacks per zone.",
-        "Buildings cast soft drop shadows on the ground.",
-        "Roof surfaces show material texture — tile, concrete, green roof.",
+        "Each block unique in shape and orientation. Realistic setbacks per zone type.",
+        "Buildings cast soft directional drop shadows. Roof surfaces show material texture.",
+        "High building density in residential zones — small detached houses packed with gardens.",
         "",
         "LANDSCAPE:",
-        "Lush layered vegetation: dark green tree canopies with circular shadow halos.",
+        "Lush layered vegetation: dark green tree canopies with circular shadow halos beneath.",
         "Light green lawns, scattered shrubs, flower beds in public spaces.",
-        "Street trees along all major roads.",
-        "Green zones fully filled — never left as flat solid color.",
-        "",
-        "ROADS:",
-        "Preserved exactly as in input. Add subtle curb lines and pedestrian markings.",
+        "Dense street trees along all major roads.",
+        "Green and open-space zones: fully filled with rich landscape, never flat solid color.",
+        "Water zones: blue water body with natural shoreline texture.",
         "",
         "QUALITY:",
-        "Rich, dense, colorful. Competition-board quality. Crisp edges.",
-        "No text, no labels, no zone markers, no annotation remnants.",
+        "Competition-board quality. Rich, dense, colorful, and highly detailed.",
+        "Crisp clean edges. No blurriness. No cartoon shading.",
+        "No text, no labels, no zone color remnants, no annotation remnants.",
     ]
     return "\n".join(lines).strip()
 
@@ -1318,10 +1268,13 @@ else:
     def run_pass1():
         client = genai.Client(api_key=api_key)
         try:
-            # 범례 텍스트는 프롬프트에 포함됨 — 토지이용계획도 1장만
+            # Image 1: 토지이용계획도, Image 2: 범례 (참조용)
+            images = [input_for_pass1]
+            if legend_bytes:
+                images.append(legend_bytes)
             resp = client.models.generate_content(
                 model=model_name,
-                contents=make_contents(pass1_prompt, [input_for_pass1])
+                contents=make_contents(pass1_prompt, images)
             )
             out = get_image_from_resp(resp)
             if out:
