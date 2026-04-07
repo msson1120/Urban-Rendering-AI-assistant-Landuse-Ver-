@@ -683,6 +683,7 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
         "- Preserve exact zone boundary geometry. Do NOT redraw or merge zones.",
         "- NO text, labels, or annotations in the output.",
         "- Areas outside all colored zones must remain UNCHANGED.",
+        "- White areas RGB(255,255,255) = roads/paths — do NOT fill, keep as circulation space.",
         "- TOTAL SITE AREA: ~%s sqm. Scale all elements accordingly." % "{:,.0f}".format(site_area),
         "",
         "LAND USE ZONES:",
