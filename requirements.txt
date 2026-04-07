@@ -1,5 +1,6 @@
 streamlit
 Pillow
-google-genai
+google-genai>=0.3.0
 opencv-python-headless
 numpy
+openpyxl
