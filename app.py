@@ -762,6 +762,7 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
         "This is a strict in-place rendering task.",
         "Render the input image as a premium top-down 2D masterplan illustration without changing its layout.",
         "Do not redesign the plan. Only fill inside each colored zone.",
+        "The input image already defines the final site layout, road network, and zone geometry.",
         "",
         "HARD CONSTRAINTS:",
         "- The input image already contains the final layout.",
@@ -805,7 +806,11 @@ def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
 
         desc = simplify_zone_desc(desc)
 
-        if is_no_building_zone(desc) and "parking" not in desc.lower() and "no buildings" not in desc.lower():
+        if (
+            is_no_building_zone(desc)
+            and "parking" not in desc.lower()
+            and "no buildings" not in desc.lower()
+        ):
             desc += ", no buildings"
 
         color_name = describe_color_name(r, g, b)
