@@ -748,6 +748,29 @@ def build_white_mask_landuse_input(landuse_bytes, sat_bytes, site_mask):
         return landuse_bytes
 
 
+def should_keep_color(row):
+    """공원/녹지/도로/수공간 계열 → 색상 유지, 건물 구역 → 흰백판"""
+    preset = row.get("preset", "")
+    custom = row.get("custom_desc", "").strip().lower()
+
+    no_building_presets = {
+        "근린공원·주제공원", "하천·수변공간", "광장·공공공지",
+    }
+    if preset in no_building_presets:
+        return True
+
+    no_building_keywords = [
+        "no buildings", "park", "trail", "forest", "golf",
+        "pool", "water", "green buffer", "landscape", "garden",
+        "walking", "pedestrian", "plaza", "retention", "healing",
+        "open space", "lawn", "wetland",
+    ]
+    if any(k in custom for k in no_building_keywords):
+        return True
+
+    return False
+
+
 def build_composite_with_labels(landuse_bytes, table, sat_bytes=None):
     """
     합성 입력 이미지 생성:
@@ -811,7 +834,7 @@ def build_composite_with_labels(landuse_bytes, table, sat_bytes=None):
             z_counter[0] += 1
         return zone_key_to_z[key]
 
-    # ── 7. 구역별 [Z] 레이블 삽입 ────────────────────────
+    # ── 7. 구역별 처리 ───────────────────────────────────
     for i, row in enumerate(table):
         if not row.get("enabled", True):
             continue
@@ -825,6 +848,12 @@ def build_composite_with_labels(landuse_bytes, table, sat_bytes=None):
         if np.count_nonzero(mask) < 200:
             continue
 
+        if should_keep_color(row):
+            # 공원/녹지/도로 → 원본 색상 복원 (흰백판에서 되돌리기)
+            result[mask > 0] = [r, g, b]
+            continue
+
+        # 건물 구역 → Z레이블 삽입
         z_num = get_z_num(row)
         label_text = "[Z%d]" % z_num
 
@@ -858,21 +887,26 @@ def build_composite_with_labels(landuse_bytes, table, sat_bytes=None):
 
 def build_pass1_prompt(table, zone_masks, site_area, zone_label_map=None):
     lines = [
-        "You are given ONE image: a white masterplan canvas with black zone boundaries.",
-        "Each white zone contains a label [Z1], [Z2], [Z3]... showing its zone number.",
+        "You are given ONE image: a masterplan canvas with two types of zones.",
+        "",
+        "ZONE TYPES IN THE IMAGE:",
+        "- WHITE zones with [Z1], [Z2]... labels = building zones.",
+        "  Fill these with detailed architecture matching the zone type below.",
+        "- COLORED zones (green, blue, brown etc.) = parks, greenery, water, open space.",
+        "  These are already correctly colored. Enhance with landscape detail only.",
+        "  Do NOT place buildings in colored zones.",
         "",
         "TASK:",
         "Transform this into a premium top-down 2D urban masterplan illustration.",
-        "Fill each labeled zone with detailed architectural content matching the zone type below.",
         "",
         "ABSOLUTE RULES:",
-        "- Fill ONLY the white zones. Black boundary lines must remain visible.",
-        "- White background outside the site boundary must remain UNCHANGED.",
+        "- White [Z] zones: fill fully with buildings, roads, landscape per zone type.",
+        "- Colored zones: enhance with trees, texture, paths. No buildings.",
+        "- Preserve all zone boundaries exactly.",
         "- NO text, labels, or zone numbers in the output.",
-        "- Every zone must be fully filled. No flat color or empty areas.",
         "- TOTAL SITE AREA: ~%s sqm." % "{:,.0f}".format(site_area),
         "",
-        "ZONE TYPES:",
+        "BUILDING ZONE TYPES:",
     ]
 
     if zone_label_map:
