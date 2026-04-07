@@ -747,153 +747,209 @@ def build_white_mask_landuse_input(landuse_bytes, sat_bytes, site_mask):
     except Exception:
         return landuse_bytes
 
-def build_pass1_prompt(table, zone_masks, site_area):
-    lines = [
-        "You are given ONE image.",
-        "",
-        "CRITICAL — IN-PLACE RENDERING ONLY:",
-        "The input image is already the final urban plan.",
-        "All colored zones and roads are fixed geometry.",
-        "You must NOT redesign anything.",
-        "",
-        "CRITICAL — ROAD LOCK:",
-        "RGB(0,0,0) areas are roads.",
-        "- Preserve road geometry exactly: width, alignment, intersections, and boundaries",
-        "- Do NOT move, widen, narrow, bend, or reshape roads",
-        "- You may render road surfaces with realistic materials and markings",
-        "- Roads must remain clearly readable as roads",
-        "- Buildings, trees, water, and landscape masses must not be placed on road pixels",
-        "",
-        "GEOMETRY LOCK (HIGHEST PRIORITY):",
-        "- Colored zones are fixed masks",
-        "- Black pixels are immutable road network",
-        "- Preserve all zone boundaries exactly",
-        "- Preserve all roads exactly",
-        "- Do NOT change ANY pixel position of roads",
-        "- Do NOT modify geometry in any way",
-        "- Only fill inside non-road colored zones",
-        "- Areas outside the site boundary must remain unchanged",
-        "- No text or labels",
-        "- If a zone is open space, render landscape only and do not place buildings",
-        "- TOTAL SITE AREA: ~%s sqm" % "{:,.0f}".format(site_area),
-        "",
-        "LAND USE (SECOND PRIORITY):",
-    ]
 
-    seen_rgb = set()
-    for row in table:
+def build_composite_with_labels(landuse_bytes, table, sat_bytes=None):
+    """
+    합성 입력 이미지 생성:
+    위성사진(배경) + site 내부 흰색 + 검정 경계선 + [Z] 레이블
+    반환: (composite_bytes, zone_label_map)
+    """
+    if not (CV2_AVAILABLE and np is not None):
+        return landuse_bytes, {}
+
+    landuse_arr = np.array(bytes_to_pil(landuse_bytes))
+    h, w = landuse_arr.shape[:2]
+
+    # ── 1. 위성사진 배경 준비 ────────────────────────────
+    if sat_bytes:
+        sat = bytes_to_pil(sat_bytes)
+        try:
+            sat = sat.resize((w, h), Image.Resampling.LANCZOS)
+        except AttributeError:
+            sat = sat.resize((w, h), Image.LANCZOS)
+        base = np.array(sat)
+    else:
+        base = np.ones((h, w, 3), dtype=np.uint8) * 255
+
+    result = base.copy()
+
+    # ── 2. 검정 경계선 마스크 추출 ───────────────────────
+    gray = cv2.cvtColor(landuse_arr, cv2.COLOR_RGB2GRAY)
+    _, black_mask = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY_INV)
+
+    # ── 3. 흰색 외부 배경 마스크 ─────────────────────────
+    white_bg = (
+        (landuse_arr[:, :, 0] > 240) &
+        (landuse_arr[:, :, 1] > 240) &
+        (landuse_arr[:, :, 2] > 240)
+    )
+
+    # ── 4. site 내부 흰색으로 채우기 ─────────────────────
+    site_interior = ~white_bg & (black_mask == 0)
+    result[site_interior] = [255, 255, 255]
+
+    # ── 5. 검정 경계선 복원 ──────────────────────────────
+    result[black_mask > 0] = [30, 30, 30]
+
+    # ── 6. 용도 기준 Z번호 그룹화 ────────────────────────
+    def get_zone_key(row):
+        preset = row.get("preset", "[직접입력]")
+        custom = row.get("custom_desc", "").strip()
+        if custom:
+            return "custom::" + custom[:40]
+        return preset
+
+    zone_key_to_z = {}
+    zone_label_map = {}
+    z_counter = [1]
+
+    def get_z_num(row):
+        key = get_zone_key(row)
+        if key not in zone_key_to_z:
+            zone_key_to_z[key] = z_counter[0]
+            zone_label_map["Z%d" % z_counter[0]] = row
+            z_counter[0] += 1
+        return zone_key_to_z[key]
+
+    # ── 7. 구역별 [Z] 레이블 삽입 ────────────────────────
+    for i, row in enumerate(table):
         if not row.get("enabled", True):
             continue
-
         r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
-        if (r, g, b) in seen_rgb:
+        tol = int(row.get("tolerance", 25))
+        lo = np.array([max(0, r - tol), max(0, g - tol), max(0, b - tol)], dtype=np.uint8)
+        hi = np.array([min(255, r + tol), min(255, g + tol), min(255, b + tol)], dtype=np.uint8)
+        mask = cv2.inRange(landuse_arr, lo, hi)
+        k = np.ones((5, 5), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
+        if np.count_nonzero(mask) < 200:
             continue
-        seen_rgb.add((r, g, b))
 
-        # white / black road 계열
-        if (r, g, b) == (0, 0, 0):
-            lines.append(
-                "RGB(0,0,0) | Road network | fixed geometry | realistic asphalt surface | lane markings | curbs | no buildings"
+        z_num = get_z_num(row)
+        label_text = "[Z%d]" % z_num
+
+        num_comp, comp_map, stats, centroids = cv2.connectedComponentsWithStats(
+            mask, connectivity=8
+        )
+        for ci in range(1, num_comp):
+            if stats[ci, cv2.CC_STAT_AREA] < 500:
+                continue
+            cx = int(centroids[ci][0])
+            cy = int(centroids[ci][1])
+            comp_area = stats[ci, cv2.CC_STAT_AREA]
+
+            font_scale = max(0.4, min(1.5, comp_area ** 0.5 / 130))
+            thickness = max(1, int(font_scale * 2))
+            (tw, th), _ = cv2.getTextSize(
+                label_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
             )
-            continue
+            tx = max(tw // 2, min(w - tw, cx - tw // 2))
+            ty = max(th, min(h - 4, cy + th // 2))
 
-        if (r, g, b) == (255, 255, 255):
-            lines.append(
-                "RGB(255,255,255) | White road or paved circulation | immutable | keep unchanged"
+            cv2.rectangle(result,
+                (tx - 2, ty - th - 2), (tx + tw + 2, ty + 2),
+                (255, 255, 255), -1)
+            cv2.putText(result, label_text, (tx, ty),
+                cv2.FONT_HERSHEY_SIMPLEX, font_scale,
+                (20, 20, 20), thickness, cv2.LINE_AA)
+
+    return pil_to_png_bytes(Image.fromarray(result)), zone_label_map
+
+
+def build_pass1_prompt(table, zone_masks, site_area, zone_label_map=None):
+    lines = [
+        "You are given ONE image: a white masterplan canvas with black zone boundaries.",
+        "Each white zone contains a label [Z1], [Z2], [Z3]... showing its zone number.",
+        "",
+        "TASK:",
+        "Transform this into a premium top-down 2D urban masterplan illustration.",
+        "Fill each labeled zone with detailed architectural content matching the zone type below.",
+        "",
+        "ABSOLUTE RULES:",
+        "- Fill ONLY the white zones. Black boundary lines must remain visible.",
+        "- White background outside the site boundary must remain UNCHANGED.",
+        "- NO text, labels, or zone numbers in the output.",
+        "- Every zone must be fully filled. No flat color or empty areas.",
+        "- TOTAL SITE AREA: ~%s sqm." % "{:,.0f}".format(site_area),
+        "",
+        "ZONE TYPES:",
+    ]
+
+    if zone_label_map:
+        for z_key, row in zone_label_map.items():
+            preset_key = row.get("preset", "[직접입력]")
+            custom = row.get("custom_desc", "").strip()
+
+            if custom:
+                desc = custom
+            elif preset_key in ZONE_PRESETS_SIMPLE:
+                p = ZONE_PRESETS_SIMPLE[preset_key]
+                desc = p.get("prompt_note", p.get("Primary Function", ""))
+            else:
+                desc = row.get("name", z_key)
+
+            is_park = (
+                preset_key in ZONE_PRESETS_SIMPLE and
+                ZONE_PRESETS_SIMPLE[preset_key].get("Primary Function") == PARK_PF
             )
-            continue
+            park_note = " | NO buildings" if is_park else ""
 
-        preset_key = row.get("preset", "[직접입력]")
-        custom = row.get("custom_desc", "").strip()
-        name = row.get("name", "").strip()
+            user_area = row.get("area_sqm", 0)
+            area_str = " | ~%s sqm" % "{:,.0f}".format(user_area) if user_area > 0 else ""
 
-        if custom:
-            desc = custom
-        elif preset_key in ZONE_PRESETS_SIMPLE:
-            p = ZONE_PRESETS_SIMPLE[preset_key]
-            desc = p.get("prompt_note", p.get("Primary Function", ""))
-        else:
-            desc = name
-
-        desc = simplify_zone_desc(desc)
-
-        if (
-            is_no_building_zone(desc)
-            and "parking" not in desc.lower()
-            and "no buildings" not in desc.lower()
-        ):
-            desc += ", no buildings"
-
-        color_name = describe_color_name(r, g, b)
-
-        # 용도별 character intent 보강
-        extra = ""
-
-        if "단독주택" in name:
-            extra = " | Residential - Detached housing | low-rise | BCR 20–40% | FAR 80–120% | 2–3F | garden plots | street trees"
-        elif "콘도미니엄" in name:
-            extra = " | Resort condominium | mid-rise | BCR 25–45% | FAR 120–220% | 4–8F | leisure landscape"
-        elif "공원" in name and "골프" not in name and "마을" not in name:
-            extra = " | Public park | no buildings | dense trees | lawn | walking paths"
-        elif "마을공원" in name:
-            extra = " | Neighborhood park | no buildings | trees | seating | pocket open space"
-        elif "녹지" in name:
-            extra = " | Green buffer | no buildings | natural vegetation"
-        elif "치유의숲" in name:
-            extra = " | Healing forest | no buildings | forest trails | meditation spaces"
-        elif "파크골프" in name:
-            extra = " | Park golf course | no buildings | open grass field"
-        elif "저류지" in name:
-            extra = " | Retention basin | no buildings | water surface | landscape edge"
-        elif "주차장" in name:
-            extra = " | Parking area | paved surface | structured layout"
-        elif "복합커뮤니티" in name:
-            extra = " | Community complex | mid-rise | BCR 30–50% | FAR 100–180% | 2–5F | civic plaza"
-        elif "주민편의" in name:
-            extra = " | Local mixed-use | low-rise | BCR 30–50% | FAR 80–150% | 2–4F | neighborhood frontage"
-        elif "6차산업" in name:
-            extra = " | Agri-processing complex | low-rise cluster | productive landscape"
-        elif "스마트팜" in name:
-            extra = " | Smart farm | greenhouse clusters | agricultural facilities"
-        elif "파머스마켓" in name:
-            extra = " | Farmers market | stalls and small pavilions | active public space"
-        elif "보행자전용" in name:
-            extra = " | Pedestrian street | paving | no vehicles"
-        elif "산책로" in name:
-            extra = " | Walking trail | landscape path | no buildings"
-
-        if extra:
-            lines.append("RGB(%d,%d,%d) | %s zone%s" % (r, g, b, color_name, extra))
-        else:
-            lines.append("RGB(%d,%d,%d) | %s zone | %s" % (r, g, b, color_name, desc))
+            lines.append("  [%s] = %s%s%s" % (z_key, desc, park_note, area_str))
+    else:
+        # fallback: 기존 RGB 방식
+        seen_rgb = set()
+        for row in table:
+            if not row.get("enabled", True):
+                continue
+            r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
+            if (r, g, b) in seen_rgb:
+                continue
+            seen_rgb.add((r, g, b))
+            preset_key = row.get("preset", "[직접입력]")
+            custom = row.get("custom_desc", "").strip()
+            if custom:
+                desc = custom
+            elif preset_key in ZONE_PRESETS_SIMPLE:
+                p = ZONE_PRESETS_SIMPLE[preset_key]
+                desc = p.get("prompt_note", p.get("Primary Function", ""))
+            else:
+                desc = row.get("name", "")
+            lines.append("  RGB(%d,%d,%d) = %s" % (r, g, b, desc))
 
     lines += [
         "",
-        "TASK:",
-        "Fill each non-road colored zone with a top-down 2D masterplan layout.",
-        "Render black road areas as realistic roads while preserving their exact geometry.",
+        "GEOMETRY LOCK — NON-NEGOTIABLE:",
+        "Preserve ALL zone boundaries exactly as shown.",
+        "Insert content within existing zones only. Never redesign boundaries.",
         "",
-        "OUTPUT STYLE (LOW PRIORITY):",
-        "- Premium Korean urban development masterplan illustration",
-        "- Fill the entire site completely — no empty areas except protected road surfaces",
+        "OUTPUT STYLE — PREMIUM 2D MASTERPLAN:",
+        "Style: high-end Korean urban development competition board.",
+        "",
+        "COLOR PALETTE:",
+        "Residential: warm beige/cream buildings, grey slate rooftops, soft shadows.",
+        "Parks/green: rich dark green canopy, light green lawn, circular tree shadows.",
+        "Public facilities: terracotta/orange accent roofs, civic plazas.",
+        "Water: vivid blue-green with ripple texture.",
+        "Roads: light warm grey, white lane markings, curb lines.",
         "",
         "BUILDINGS:",
-        "- Many individual building footprints",
-        "- Use articulated shapes: L-shape, U-shape, courtyard, slab, podium",
-        "- Realistic spacing and setbacks per zone type",
-        "",
-        "ROADS:",
-        "- Preserve the exact uploaded road geometry",
-        "- Render roads as realistic streets with asphalt texture, lane markings, curbs, and sidewalks where appropriate",
-        "- Keep hierarchy clear: primary roads, secondary roads, and local access roads",
-        "- Do not place buildings or heavy landscape masses on roads",
+        "Many varied footprints — L-shape, U-shape, courtyard, slab, podium.",
+        "Each block unique. Realistic setbacks. Soft directional drop shadows.",
+        "Roof surfaces show material texture.",
         "",
         "LANDSCAPE:",
-        "- Rich and layered — tree canopy clusters, street trees, central greens, pocket parks",
-        "- Each zone must have visually distinct character matching its assigned program",
-        "- High visual density. No large empty areas",
+        "Lush dark green canopies with circular shadow halos.",
+        "Light green lawns, shrubs, flower beds in public spaces.",
+        "Dense street trees along all major roads.",
+        "Green zones: fully filled with rich landscape, never flat color.",
+        "",
+        "QUALITY:",
+        "Competition-board quality. Rich, dense, colorful, highly detailed.",
+        "Crisp clean edges. No text, no labels, no zone markers in output.",
     ]
-
     return "\n".join(lines).strip()
 
 
@@ -1312,23 +1368,6 @@ else:
     # ── 공통 준비 ──────────────────────────────────────────
     table = st.session_state.land_use_table
 
-    pass1_site_mask = None
-    if CV2_AVAILABLE:
-        pass1_site_mask, _ = extract_site_mask_from_landuse(st.session_state.img_landuse_bytes, table)
-
-    if pass1_site_mask is not None:
-        input_for_pass1 = build_white_mask_landuse_input(
-            st.session_state.img_landuse_bytes,
-            st.session_state.img_sat_bytes,
-            pass1_site_mask
-        )
-        st.info("PASS1 입력: white mask 기반 토지이용계획도")
-    else:
-        input_for_pass1 = st.session_state.img_landuse_bytes
-        st.info("PASS1 입력: 토지이용계획도")
-
-    with st.expander("PASS1 입력 이미지 미리보기", expanded=False):
-        st.image(bytes_to_pil(input_for_pass1), use_container_width=True)
 
     # 범례 이미지 — UI 미리보기 전용 (API 입력에는 사용 안 함)
     legend_bytes = build_legend_image(table)
@@ -1338,13 +1377,33 @@ else:
         st.image(bytes_to_pil(legend_bytes), width=420,
                  caption="범례 이미지 — 사용자 확인용 미리보기 (PASS1 모델 입력에는 사용하지 않음)")
 
-    # 구역 마스크 (위치 정보용)
+    # 합성 입력 이미지 생성 (위성 + 흰백판 + Z레이블)
+    composite_bytes = None
+    zone_label_map = {}
+    if CV2_AVAILABLE:
+        with st.spinner("입력 이미지 합성 중..."):
+            composite_bytes, zone_label_map = build_composite_with_labels(
+                st.session_state.img_landuse_bytes,
+                table,
+                st.session_state.img_sat_bytes  # None이면 흰색 배경
+            )
+
+    if composite_bytes:
+        st.markdown('<div class="sub-label">합성 입력 이미지 (PASS1 입력용)</div>',
+                    unsafe_allow_html=True)
+        st.image(bytes_to_pil(composite_bytes),
+                 caption="위성배경 + 흰백판 + Z레이블",
+                 use_container_width=True)
+
+    input_for_pass1 = composite_bytes if composite_bytes else st.session_state.img_landuse_bytes
+
     zone_masks = {}
     if CV2_AVAILABLE:
         zone_masks = extract_zone_masks(st.session_state.img_landuse_bytes, table)
 
-    # 프롬프트
-    pass1_prompt = build_pass1_prompt(table, zone_masks, st.session_state.site_area_sqm)
+    pass1_prompt = build_pass1_prompt(
+        table, zone_masks, st.session_state.site_area_sqm, zone_label_map
+    )
     pass2_prompt = build_pass2_prompt(table)
 
     # 개발자 확인
@@ -1374,28 +1433,8 @@ else:
             )
             out = get_image_from_resp(resp)
             if out:
-                out_img = bytes_to_pil(out)
-                st.caption(
-                    "[DEBUG] PASS1 model=%s / size=%dx%d" % (
-                        model_name, out_img.size[0], out_img.size[1]
-                    )
-                )
                 out = remove_white_lines(out)
-                if CV2_AVAILABLE:
-                    site_mask, _ = extract_site_mask_from_landuse(
-                        st.session_state.img_landuse_bytes, table
-                    )
-                    if st.session_state.img_sat_bytes and site_mask is not None:
-                        # 위성사진 있으면 위성으로 외부 복원
-                        out = apply_satellite_outside(
-                            st.session_state.img_sat_bytes, out, site_mask
-                        )
-                    elif site_mask is not None:
-                        # 위성사진 없으면 흰 배경으로 외부 복원
-                        clean_bg = make_clean_bg_like_landuse(
-                            st.session_state.img_landuse_bytes, site_mask
-                        )
-                        out = apply_satellite_outside(clean_bg, out, site_mask)
+                # 위성 합성 불필요 — 이미 입력에 포함됨
                 st.session_state.pass1_outputs.append(out)
                 st.session_state.pass1_selected_idx = len(st.session_state.pass1_outputs) - 1
                 st.session_state.pass1_output_bytes = out
