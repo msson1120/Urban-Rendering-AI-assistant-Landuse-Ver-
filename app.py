@@ -395,7 +395,7 @@ def make_default_table():
             "preset": preset,
             "custom_desc": custom_desc,
             "area_sqm": area,
-            "tolerance": 25,
+            "tolerance": 18,
             "enabled": True,
         }
         for n, rgb, preset, custom_desc, area in defaults
@@ -705,54 +705,134 @@ def is_no_building_zone(desc: str) -> bool:
                 "healing forest", "golf course", "pool", "no buildings"]
     return any(k in d for k in keywords)
 
+
+def describe_color_name(r: int, g: int, b: int) -> str:
+    candidates = [
+        ((255, 255, 255), "white"),
+        ((255, 255, 127), "light yellow"),
+        ((255, 230, 100), "warm yellow"),
+        ((255, 200, 150), "pale orange"),
+        ((255, 159, 127), "soft orange"),
+        ((255, 140, 140), "soft red"),
+        ((223, 127, 255), "bright purple"),
+        ((159, 127, 255), "lavender"),
+        ((165, 82, 124), "muted purple"),
+        ((255, 0, 255), "magenta"),
+        ((127, 191, 255), "sky blue"),
+        ((127, 223, 255), "light cyan"),
+        ((173, 241, 255), "light cyan"),
+        ((0, 165, 0), "dark green"),
+        ((191, 255, 127), "light green"),
+        ((127, 255, 0), "deep green"),
+        ((145, 165, 82), "olive green"),
+        ((103, 165, 82), "olive green"),
+        ((165, 124, 0), "warm brown"),
+        ((165, 82, 0), "brown"),
+        ((137, 137, 137), "grey"),
+    ]
+    best_name = "colored"
+    best_dist = 10**9
+    for (cr, cg, cb), name in candidates:
+        dist = abs(r - cr) + abs(g - cg) + abs(b - cb)
+        if dist < best_dist:
+            best_dist = dist
+            best_name = name
+    return best_name
+
+
+def make_clean_bg_like_landuse(landuse_bytes: bytes, site_mask) -> bytes:
+    if not (CV2_AVAILABLE and np is not None) or site_mask is None:
+        return landuse_bytes
+    try:
+        arr = np.array(bytes_to_pil(landuse_bytes))
+        h, w = arr.shape[:2]
+        bg = np.full((h, w, 3), 255, dtype=np.uint8)  # 흡 배경
+        bg[site_mask > 0] = arr[site_mask > 0]        # site 내부만 원본 유지
+        return pil_to_png_bytes(Image.fromarray(bg))
+    except Exception:
+        return landuse_bytes
+
+
 def build_pass1_prompt(table: list, zone_masks: dict, site_area: float) -> str:
     lines = [
-        "You are given TWO images:",
-        "- Image 1: A land use plan map with colored zones. THIS is what you must render.",
-        "- Image 2: A legend showing color chips with land use descriptions. Use as REFERENCE ONLY. Do NOT render or reproduce Image 2.",
+        "You are given ONE image:",
+        "Image 1 is the final land use plan geometry.",
         "",
         "TASK:",
-        "Transform Image 1 into a premium top-down 2D urban masterplan illustration.",
-        "Fill each colored zone in Image 1 with detailed architectural content.",
-        "Refer to Image 2 to understand what each color zone represents.",
+        "This is a strict in-place rendering task.",
+        "Render the input image as a premium top-down 2D masterplan illustration without changing its layout.",
+        "Do not redesign the plan. Only fill inside each colored zone.",
         "",
-        "ABSOLUTE RULES:",
-        "- Render ONLY Image 1. Image 2 is reference only.",
-        "- Preserve all zone boundaries and road lines exactly as shown in Image 1.",
-        "- White roads in Image 1 must remain visible and unchanged.",
-        "- Areas outside the site boundary must remain UNCHANGED.",
-        "- NO text, labels, or annotations in the output.",
-        "- Every zone must be fully filled. No flat color or empty areas.",
+        "HARD CONSTRAINTS:",
+        "- The input image already contains the final layout.",
+        "- Treat each colored zone as a fixed mask.",
+        "- Preserve all zone boundaries exactly.",
+        "- Preserve all white roads exactly.",
+        "- Do not move, redraw, widen, narrow, or recreate roads.",
+        "- Do not simplify, smooth, or reinterpret any geometry.",
+        "- Areas outside the site boundary must remain unchanged.",
+        "- No text, labels, or annotations.",
+        "- Every zone must be fully filled with detailed content.",
+        "- Avoid repetitive identical buildings.",
         "- TOTAL SITE AREA: ~%s sqm." % "{:,.0f}".format(site_area),
         "",
-        "OUTPUT STYLE — PREMIUM 2D MASTERPLAN:",
-        "Style: high-end Korean urban development competition board.",
-        "Match the quality of a professional architectural visualization firm.",
+        "LAND USE COLOR MEANINGS:",
+    ]
+
+    seen_rgb = set()
+    for row in table:
+        if not row.get("enabled", True):
+            continue
+
+        r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
+        if (r, g, b) in SKIP_COLORS:
+            continue
+        if (r, g, b) in seen_rgb:
+            continue
+        seen_rgb.add((r, g, b))
+
+        preset_key = row.get("preset", "[직접입력]")
+        custom = row.get("custom_desc", "").strip()
+        name = row.get("name", "").strip()
+
+        if custom:
+            desc = custom
+        elif preset_key in ZONE_PRESETS_SIMPLE:
+            p = ZONE_PRESETS_SIMPLE[preset_key]
+            desc = p.get("prompt_note", p.get("Primary Function", ""))
+        else:
+            desc = name
+
+        desc = simplify_zone_desc(desc)
+
+        if is_no_building_zone(desc) and "parking" not in desc.lower() and "no buildings" not in desc.lower():
+            desc += ", no buildings"
+
+        color_name = describe_color_name(r, g, b)
+        lines.append("RGB(%d,%d,%d) = %s zone, %s" % (r, g, b, color_name, desc))
+
+    lines += [
         "",
-        "COLOR PALETTE:",
-        "Residential: warm beige/cream buildings, grey slate rooftops, soft drop shadows.",
-        "Parks/green zones: rich dark green canopy, light green lawn, circular tree shadows.",
-        "Public facilities: terracotta/orange accent roofs, civic plazas.",
-        "Water: vivid blue-green with subtle ripple texture.",
-        "Roads: light warm grey asphalt, white lane markings, curb lines.",
+        "RENDER STYLE:",
+        "Premium Korean urban masterplan board image.",
+        "Top-down 2D illustration.",
+        "Rich detail, crisp edges, realistic landscape layering.",
+        "No cartoon simplification.",
+        "No zone color leftovers.",
         "",
         "BUILDINGS:",
-        "Many varied footprints — L-shape, U-shape, courtyard, slab bar, point tower, podium.",
-        "Each block unique in shape and orientation. Realistic setbacks per zone type.",
-        "Buildings cast soft directional drop shadows. Roof surfaces show material texture.",
-        "High building density in residential zones — small detached houses packed with gardens.",
+        "Use varied building footprints appropriate to each zone type.",
+        "Use articulated forms such as L-shape, U-shape, courtyard, slab bar, point tower, and podium combinations.",
+        "Apply realistic spacing and setbacks by zone type.",
+        "Do not alter the block structure or road-defined parcel geometry.",
         "",
         "LANDSCAPE:",
-        "Lush layered vegetation: dark green tree canopies with circular shadow halos beneath.",
-        "Light green lawns, scattered shrubs, flower beds in public spaces.",
-        "Dense street trees along all major roads.",
-        "Green and open-space zones: fully filled with rich landscape, never flat solid color.",
-        "Water zones: blue water body with natural shoreline texture.",
+        "Rich and layered landscape with tree clusters, street trees, central greens, and pocket parks.",
+        "Green and open-space zones must be fully filled with landscape elements, not left as flat color.",
         "",
         "QUALITY:",
-        "Competition-board quality. Rich, dense, colorful, and highly detailed.",
-        "Crisp clean edges. No blurriness. No cartoon shading.",
-        "No text, no labels, no zone color remnants, no annotation remnants.",
+        "High detail, crisp clean edges, dense composition.",
+        "No text, no labels, no annotation remnants.",
     ]
     return "\n".join(lines).strip()
 
@@ -1018,7 +1098,7 @@ elif cur_step == 1:
                         "preset": _preset,
                         "custom_desc": _custom,
                         "area_sqm": _area,
-                        "tolerance": 25,
+                        "tolerance": 18,
                         "enabled": True,
                     })
                 if _new_rows:
@@ -1092,7 +1172,7 @@ elif cur_step == 1:
                     "preset": item[2],
                     "custom_desc": "",
                     "area_sqm": 10000.0,
-                    "tolerance": 25,
+                    "tolerance": 18,
                     "enabled": True,
                 })
                 st.rerun()
@@ -1112,7 +1192,7 @@ elif cur_step == 1:
                     "preset": new_preset,
                     "custom_desc": "",
                     "area_sqm": 10000.0,
-                    "tolerance": 25,
+                    "tolerance": 18,
                     "enabled": True,
                 })
                 st.rerun()
@@ -1238,7 +1318,7 @@ else:
         st.markdown('<div class="sub-label">범례 이미지 미리보기 (UI 확인용)</div>',
                     unsafe_allow_html=True)
         st.image(bytes_to_pil(legend_bytes), width=420,
-                 caption="범례 이미지 — 프롬프트 텍스트로 모델에 전달됩니다")
+                 caption="범례 이미지 — 사용자 확인용 미리보기 (PASS1 모델 입력에는 사용하지 않음)")
 
     # 구역 마스크 (위치 정보용)
     zone_masks = {}
@@ -1268,13 +1348,10 @@ else:
     def run_pass1():
         client = genai.Client(api_key=api_key)
         try:
-            # Image 1: 토지이용계획도, Image 2: 범례 (참조용)
-            images = [input_for_pass1]
-            if legend_bytes:
-                images.append(legend_bytes)
+            # 범례 텍스트는 프롬프트에 포함됨 — 토지이용계획도 1장만
             resp = client.models.generate_content(
                 model=model_name,
-                contents=make_contents(pass1_prompt, images)
+                contents=make_contents(pass1_prompt, [input_for_pass1])
             )
             out = get_image_from_resp(resp)
             if out:
@@ -1289,10 +1366,11 @@ else:
                             st.session_state.img_sat_bytes, out, site_mask
                         )
                     elif site_mask is not None:
-                        # 위성사진 없으면 토지이용계획도로 외부 복원
-                        out = apply_satellite_outside(
-                            st.session_state.img_landuse_bytes, out, site_mask
+                        # 위성사진 없으면 흰 배경으로 외부 복원
+                        clean_bg = make_clean_bg_like_landuse(
+                            st.session_state.img_landuse_bytes, site_mask
                         )
+                        out = apply_satellite_outside(clean_bg, out, site_mask)
                 st.session_state.pass1_outputs.append(out)
                 st.session_state.pass1_selected_idx = len(st.session_state.pass1_outputs) - 1
                 st.session_state.pass1_output_bytes = out
