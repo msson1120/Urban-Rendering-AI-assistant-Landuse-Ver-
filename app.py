@@ -375,36 +375,6 @@ def ensure_session():
 ensure_session()
 
 # ──────────────────────────────────────────────────────────────
-# 기본 테이블
-# ──────────────────────────────────────────────────────────────
-def make_default_table():
-    defaults = [
-        ("단독주택",         (255, 255, 127), "단독주택",          "",                                                              10000.0),
-        ("공원",             (  0, 165,   0), "근린공원·주제공원", "",                                                              15000.0),
-        ("녹지·완충녹지",    (191, 255, 127), "근린공원·주제공원", "",                                                               8000.0),
-        ("공공청사",         (180, 220, 200), "공공청사·행정시설", "",                                                               5000.0),
-        ("주차장",           (137, 137, 137), "주차장",            "",                                                               3000.0),
-        ("숙박시설",         (255, 191, 127), "[직접입력]",        "resort hotel with amenity facilities, 5~10F, warm facade",      12000.0),
-        ("복합커뮤니티시설", (255, 159, 127), "[직접입력]",        "community center with multipurpose hall and outdoor plaza",      4000.0),
-        ("치유의숲",         (127, 255,   0), "[직접입력]",        "healing forest with walking trails, meditation zones, no buildings", 20000.0),
-    ]
-    return [
-        {
-            "name": n,
-            "r": rgb[0], "g": rgb[1], "b": rgb[2],
-            "preset": preset,
-            "custom_desc": custom_desc,
-            "area_sqm": area,
-            "tolerance": 18,
-            "enabled": True,
-        }
-        for n, rgb, preset, custom_desc, area in defaults
-    ]
-
-if not st.session_state.land_use_table:
-    st.session_state.land_use_table = make_default_table()
-
-# ──────────────────────────────────────────────────────────────
 # 이미지 유틸
 # ──────────────────────────────────────────────────────────────
 def pil_to_png_bytes(img: Image.Image) -> bytes:
@@ -1078,133 +1048,68 @@ elif cur_step == 1:
                 st.error("openpyxl 패키지가 필요합니다. pip install openpyxl")
 
         xl_file = st.file_uploader("엑셀 파일 업로드 (.xlsx)", type=["xlsx"], key="xl_upload")
+
         if xl_file and st.button("테이블에 적용", type="primary", key="apply_xl"):
             try:
                 import openpyxl as _openpyxl
                 import io as _io
-                _wb = _openpyxl.load_workbook(_io.BytesIO(xl_file.getvalue()))
+
+                _wb = _openpyxl.load_workbook(_io.BytesIO(xl_file.getvalue()), data_only=True)
                 _ws = _wb.active
+
                 _new_rows = []
                 for _row in _ws.iter_rows(min_row=2, values_only=True):
-                    if not _row[0]:
+                    # 완전 빈 행 스킵
+                    if _row is None or all(v is None or str(v).strip() == "" for v in _row):
                         continue
-                    _name   = str(_row[0]).strip()
-                    _r      = max(0, min(255, int(_row[1] or 0)))
-                    _g      = max(0, min(255, int(_row[2] or 0)))
-                    _b      = max(0, min(255, int(_row[3] or 0)))
-                    _area   = float(_row[4] or 10000)
+
+                    # 용도명 없으면 스킵
+                    if _row[0] is None or str(_row[0]).strip() == "":
+                        continue
+
+                    _name = str(_row[0]).strip()
+                    _r = max(0, min(255, int(float(_row[1] or 0))))
+                    _g = max(0, min(255, int(float(_row[2] or 0))))
+                    _b = max(0, min(255, int(float(_row[3] or 0))))
+                    _area = float(_row[4] or 0)
                     _custom = str(_row[5] or "").strip()
                     _preset = str(_row[6] or "[직접입력]").strip()
+
                     if _preset not in PRESET_OPTIONS:
                         _preset = "[직접입력]"
+
                     _new_rows.append({
                         "name": _name,
-                        "r": _r, "g": _g, "b": _b,
+                        "r": _r,
+                        "g": _g,
+                        "b": _b,
                         "preset": _preset,
                         "custom_desc": _custom,
                         "area_sqm": _area,
                         "tolerance": 18,
                         "enabled": True,
                     })
+
+                # 업로드한 엑셀 내용만 남기기
+                st.session_state.land_use_table = _new_rows
+                st.session_state["_auto_colors"] = []
+
                 if _new_rows:
-                    st.session_state.land_use_table = _new_rows
                     st.success("%d개 항목 불러옴" % len(_new_rows))
-                    st.rerun()
                 else:
-                    st.warning("불러온 데이터가 없습니다. 2행부터 데이터를 입력하세요.")
+                    st.warning("엑셀에서 불러온 유효 행이 없습니다. 2행부터 데이터를 확인하세요.")
+
+                st.rerun()
+
             except Exception as _e:
                 st.error("엑셀 파일 오류: %s" % str(_e))
-
-    # ── 색상 자동 추출 ──────────────────────────────────────
-    if st.session_state.img_landuse_bytes and CV2_AVAILABLE:
-        if st.button("🎨 이미지에서 색상 자동 추출"):
-            with st.spinner("색상 분석 중..."):
-                colors = extract_dominant_colors(st.session_state.img_landuse_bytes, n_colors=12)
-            st.session_state["_auto_colors"] = colors
-
-        colors = st.session_state.get("_auto_colors", [])
-        if colors:
-            st.markdown("**감지된 주요 색상 — 각 색상을 용도에 매핑하세요**")
-            new_rows = []
-            cols_per_row = 4
-            for i in range(0, len(colors), cols_per_row):
-                chunk = colors[i:i + cols_per_row]
-                ccols = st.columns(cols_per_row)
-                for j, (r, g, b, ratio) in enumerate(chunk):
-                    hex_c = "#%02x%02x%02x" % (r, g, b)
-                    with ccols[j]:
-                        st.markdown(
-                            '<div style="background:%s;height:40px;border-radius:6px;'
-                            'border:1px solid #ccc;"></div>' % hex_c,
-                            unsafe_allow_html=True
-                        )
-                        st.caption("RGB(%d,%d,%d)  %.1f%%" % (r, g, b, ratio * 100))
-                        preset_sel = st.selectbox(
-                            "용도", ["(무시)"] + PRESET_KEYS,
-                            key="auto_preset_%d" % (i + j)
-                        )
-                        if preset_sel != "(무시)":
-                            new_rows.append({
-                                "name": preset_sel,
-                                "r": r, "g": g, "b": b,
-                                "preset": preset_sel,
-                                "custom_desc": "",
-                                "area_sqm": 10000.0,
-                                "tolerance": 20,
-                                "enabled": True,
-                            })
-            if st.button("+ 선택 항목을 테이블에 추가", type="primary", key="apply_auto"):
-                if new_rows:
-                    st.session_state.land_use_table = new_rows
-                    st.session_state["_auto_colors"] = []
-                    st.rerun()
-
-        st.markdown("---")
-
-    # ── 표준 항목 추가 ──────────────────────────────────────
-    with st.expander("+ 항목 추가", expanded=False):
-        lu_names = [lu[0] for lu in STANDARD_LAND_USES]
-        ac1, ac2 = st.columns([3, 1])
-        with ac1:
-            sel_lu = st.selectbox("표준 항목에서 선택", lu_names)
-        with ac2:
-            if st.button("추가", type="primary"):
-                idx = lu_names.index(sel_lu)
-                item = STANDARD_LAND_USES[idx]
-                st.session_state.land_use_table.append({
-                    "name": item[0],
-                    "r": item[1][0], "g": item[1][1], "b": item[1][2],
-                    "preset": item[2],
-                    "custom_desc": "",
-                    "area_sqm": 10000.0,
-                    "tolerance": 18,
-                    "enabled": True,
-                })
-                st.rerun()
-
-        st.markdown("**직접 입력**")
-        dc1, dc2, dc3, dc4, dc5 = st.columns([2, 0.7, 0.7, 0.7, 1.5])
-        new_name   = dc1.text_input("용도명", key="new_name")
-        new_r      = dc2.number_input("R", 0, 255, 128, key="new_r")
-        new_g      = dc3.number_input("G", 0, 255, 128, key="new_g")
-        new_b      = dc4.number_input("B", 0, 255, 128, key="new_b")
-        new_preset = dc5.selectbox("프리셋", PRESET_OPTIONS, key="new_preset")
-        if st.button("직접 추가"):
-            if new_name:
-                st.session_state.land_use_table.append({
-                    "name": new_name,
-                    "r": int(new_r), "g": int(new_g), "b": int(new_b),
-                    "preset": new_preset,
-                    "custom_desc": "",
-                    "area_sqm": 10000.0,
-                    "tolerance": 18,
-                    "enabled": True,
-                })
-                st.rerun()
 
     # ── 테이블 편집 ───────────────────────────────────────
     st.markdown('<div class="sub-label">토지이용 항목 목록</div>', unsafe_allow_html=True)
     table = st.session_state.land_use_table
+
+    if not table:
+        st.info("현재 등록된 토지이용 항목이 없습니다. 엑셀 파일을 업로드해 테이블에 적용하세요.")
     to_delete = []
 
     for i, row in enumerate(table):
