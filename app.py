@@ -730,7 +730,7 @@ def make_clean_bg_like_landuse(landuse_bytes: bytes, site_mask) -> bytes:
         return landuse_bytes
 
 
-def build_white_mask_landuse_input(landuse_bytes: bytes, sat_bytes, site_mask) -> bytes:
+def build_white_mask_landuse_input(landuse_bytes, sat_bytes, site_mask):
     """
     PASS1 입력용:
     - site 내부: 원래 토지이용 색상 유지
