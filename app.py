@@ -42,8 +42,6 @@ st.markdown("""
     --success: #16A34A;
     --border: #E5E7EB;
     --radius: 10px;
-    --text: #111827;
-    --muted: #6B7280;
 }
 .block-container { max-width: 1280px; padding: 1.5rem 2rem; margin: 0 auto; }
 div[data-testid="stButton"] button { border-radius:8px !important; font-weight:600 !important; }
@@ -83,8 +81,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────
-# 표준 토지이용 항목 — 실제 사용 RGB값 기반
-# (용도명, RGB, 프리셋키, 설명)
+# 표준 토지이용 항목
 # ──────────────────────────────────────────────────────────────
 STANDARD_LAND_USES = [
     # 주거
@@ -142,208 +139,116 @@ STANDARD_LAND_USES = [
 ZONE_PRESETS_SIMPLE = {
     "단독주택": {
         "Primary Function": "Residential - Detached housing",
-        "mass_types": ["Terraced / stepped mass — 테라스/계단형"],
-        "Height Strategy": "Uniform low-rise",
-        "bcr_level": "Low", "far_level": "Low", "floor_level": "Low",
-        "Primary Façade Material": ["brick"],
-        "Landscape Density Strategy": "Street tree dominant",
-        "prompt_note": "Low-rise detached housing, 2~3F, garden plots",
+        "floor_level": "Low",
+        "prompt_note": "Low-rise detached housing, 2~3F, garden plots, private residential character",
     },
     "연립·다세대주택": {
         "Primary Function": "Residential - Attached housing",
-        "mass_types": ["Courtyard block — 중정형 블록"],
-        "Height Strategy": "Mid-rise field",
-        "bcr_level": "Medium", "far_level": "Low", "floor_level": "Low",
-        "Primary Façade Material": ["brick"],
-        "Landscape Density Strategy": "Street tree dominant",
+        "floor_level": "Low",
         "prompt_note": "Low-to-mid rise attached housing, 3~5F, courtyard arrangement",
     },
     "공동주택(판상형 아파트)": {
         "Primary Function": "Residential - Slab apartment complex",
-        "mass_types": ["Slab bar — 판상형"],
-        "Height Strategy": "Mid-rise field",
-        "bcr_level": "Low", "far_level": "Medium", "floor_level": "Medium–High",
-        "Primary Façade Material": ["concrete"],
-        "Landscape Density Strategy": "Green corridor emphasis",
-        "prompt_note": "Slab-type apartment, 8~15F, south-facing, central green",
+        "floor_level": "Medium–High",
+        "prompt_note": "Slab-type apartment, 8~15F, south-facing orientation, central green space",
     },
     "공동주택(타워형 아파트)": {
         "Primary Function": "Residential - High-rise tower apartment",
-        "mass_types": ["Point tower — 타워형"],
-        "Height Strategy": "Scattered high-rise accents",
-        "bcr_level": "Very low", "far_level": "Medium–High", "floor_level": "High",
-        "Primary Façade Material": ["glass", "concrete"],
-        "Landscape Density Strategy": "Park-heavy composition",
+        "floor_level": "High",
         "prompt_note": "High-rise point tower apartment, 20~30F, large landscaped podium",
     },
     "준주거용지": {
         "Primary Function": "Quasi-residential mixed-use",
-        "mass_types": ["Perimeter block — 가로연접 블록"],
-        "Height Strategy": "Mid-rise field",
-        "bcr_level": "Medium–High", "far_level": "Medium", "floor_level": "Low",
-        "Primary Façade Material": ["brick", "glass"],
-        "Landscape Density Strategy": "Street tree dominant",
+        "floor_level": "Low",
         "prompt_note": "Mixed-use quasi-residential, ground retail with residential above, 3~6F",
     },
     "근린생활시설용지": {
         "Primary Function": "Commercial dominant",
-        "mass_types": ["Perimeter block — 가로연접 블록"],
-        "Height Strategy": "Uniform low-rise",
-        "bcr_level": "High", "far_level": "Low", "floor_level": "Low",
-        "Primary Façade Material": ["brick"],
-        "Landscape Density Strategy": "Street tree dominant",
+        "floor_level": "Low",
         "prompt_note": "Low-rise neighborhood commercial strip, 2~4F storefronts",
     },
     "일반상업용지": {
         "Primary Function": "Commercial dominant",
-        "mass_types": ["Podium + tower — 포디움+타워"],
-        "Height Strategy": "Stepped skyline",
-        "bcr_level": "Medium–High", "far_level": "High", "floor_level": "Medium–High",
-        "Primary Façade Material": ["glass", "metal"],
-        "Landscape Density Strategy": "Street tree dominant",
+        "floor_level": "Medium–High",
         "prompt_note": "General commercial zone, podium-and-tower typology, 8~20F",
     },
     "복합상업시설(대형몰·복합몰)": {
         "Primary Function": "Commercial dominant",
-        "mass_types": ["Podium + tower — 포디움+타워"],
-        "Height Strategy": "Single landmark tower",
-        "bcr_level": "High", "far_level": "High", "floor_level": "Medium–High",
-        "Primary Façade Material": ["glass", "metal"],
-        "Landscape Density Strategy": "Street tree dominant",
+        "floor_level": "Medium–High",
         "prompt_note": "Large-scale mixed commercial complex, COEX style, 10~25F",
     },
     "업무시설용지(오피스)": {
         "Primary Function": "Office dominant",
-        "mass_types": ["Point tower — 타워형"],
-        "Height Strategy": "Scattered high-rise accents",
-        "bcr_level": "Medium", "far_level": "High", "floor_level": "High",
-        "Primary Façade Material": ["glass"],
-        "Landscape Density Strategy": "Street tree dominant",
-        "prompt_note": "Office tower district, plaza-level retail, 15~30F",
+        "floor_level": "High",
+        "prompt_note": "Office tower district, plaza-level retail activation, 15~30F",
     },
     "복합업무용지(오피스+상업)": {
         "Primary Function": "Office + Commercial mixed-use",
-        "mass_types": ["Podium + tower — 포디움+타워"],
-        "Height Strategy": "Stepped skyline",
-        "bcr_level": "Medium–High", "far_level": "High", "floor_level": "High",
-        "Primary Façade Material": ["glass", "metal"],
-        "Landscape Density Strategy": "Street tree dominant",
+        "floor_level": "High",
         "prompt_note": "Mixed office and commercial complex, podium retail with tower, 15~30F",
     },
     "첨단산업단지(R&D·지식산업)": {
         "Primary Function": "Innovation/R&D dominant",
-        "mass_types": ["Low-rise campus cluster — 저층 캠퍼스 클러스터"],
-        "Height Strategy": "Mid-rise field",
-        "bcr_level": "Low", "far_level": "Medium", "floor_level": "Medium",
-        "Primary Façade Material": ["glass", "metal"],
-        "Landscape Density Strategy": "Green corridor emphasis",
+        "floor_level": "Medium",
         "prompt_note": "High-tech R&D campus, courtyard green network, 3~8F",
     },
     "근린공원·주제공원": {
         "Primary Function": "Park / Open space",
-        "mass_types": [],
-        "Height Strategy": "Uniform low-rise",
-        "bcr_level": "Very low", "far_level": "Very low", "floor_level": "Very low",
-        "Primary Façade Material": ["concrete"],
-        "Landscape Density Strategy": "Park-heavy composition",
-        "prompt_note": "Neighborhood park, tree canopy, walking paths, event lawn",
+        "floor_level": "Very low",
+        "prompt_note": "Neighborhood park, tree canopy, walking paths, event lawn, no buildings",
     },
     "하천·수변공간": {
         "Primary Function": "Park / Open space",
-        "mass_types": [],
-        "Height Strategy": "Uniform low-rise",
-        "bcr_level": "Very low", "far_level": "Very low", "floor_level": "Very low",
-        "Primary Façade Material": ["concrete"],
-        "Landscape Density Strategy": "Park-heavy composition",
-        "prompt_note": "River corridor, riparian planting, boardwalk, water feature visible",
+        "floor_level": "Very low",
+        "prompt_note": "River corridor, riparian planting, boardwalk, water feature visible, no buildings",
     },
     "공공청사·행정시설": {
         "Primary Function": "Civic / Government",
-        "mass_types": ["Podium + tower — 포디움+타워"],
-        "Height Strategy": "Mid-rise field",
-        "bcr_level": "Medium", "far_level": "Medium", "floor_level": "Medium",
-        "Primary Façade Material": ["concrete", "glass"],
-        "Landscape Density Strategy": "Street tree dominant",
-        "prompt_note": "Civic government building, formal plaza entry, 5~12F",
+        "floor_level": "Medium",
+        "prompt_note": "Civic government building, formal plaza entry, institutional character, 5~12F",
     },
     "학교·교육시설": {
         "Primary Function": "Education",
-        "mass_types": ["Low-rise campus cluster — 저층 캠퍼스 클러스터"],
-        "Height Strategy": "Uniform low-rise",
-        "bcr_level": "Low", "far_level": "Low", "floor_level": "Low",
-        "Primary Façade Material": ["brick", "concrete"],
-        "Landscape Density Strategy": "Green corridor emphasis",
+        "floor_level": "Low",
         "prompt_note": "School campus, playgrounds and sports fields, 2~4F",
     },
     "종합의료시설(병원)": {
         "Primary Function": "Medical / Healthcare",
-        "mass_types": ["Podium + tower — 포디움+타워"],
-        "Height Strategy": "Scattered high-rise accents",
-        "bcr_level": "Medium", "far_level": "Medium–High", "floor_level": "Medium–High",
-        "Primary Façade Material": ["glass", "concrete"],
-        "Landscape Density Strategy": "Street tree dominant",
+        "floor_level": "Medium–High",
         "prompt_note": "General hospital complex, tower block with podium, 8~20F",
     },
     "대규모 문화시설(공연·전시·컨벤션)": {
         "Primary Function": "Large-scale cultural / Convention",
-        "mass_types": ["Podium + tower — 포디움+타워"],
-        "Height Strategy": "Single landmark tower",
-        "bcr_level": "Medium", "far_level": "Medium", "floor_level": "Medium",
-        "Primary Façade Material": ["glass", "metal"],
-        "Landscape Density Strategy": "Park-heavy composition",
+        "floor_level": "Medium",
         "prompt_note": "Large cultural landmark: convention center, grand civic plaza",
     },
     "광장·공공공지": {
         "Primary Function": "Open space dominant",
-        "mass_types": [],
-        "Height Strategy": "Uniform low-rise",
-        "bcr_level": "Very low", "far_level": "Very low", "floor_level": "Very low",
-        "Primary Façade Material": ["concrete"],
-        "Landscape Density Strategy": "Sparse planting",
+        "floor_level": "Very low",
         "prompt_note": "Civic plaza, paved surface, fountain or public art, no buildings",
     },
     "주차장": {
-        "Primary Function": "Open space dominant",
-        "mass_types": ["Slab bar — 판상형"],
-        "Height Strategy": "Uniform low-rise",
-        "bcr_level": "High", "far_level": "Very low", "floor_level": "Very low",
-        "Primary Façade Material": ["concrete"],
-        "Landscape Density Strategy": "Sparse planting",
-        "prompt_note": "Surface or structured parking lot, 1~3F",
+        "Primary Function": "Parking",
+        "floor_level": "Very low",
+        "prompt_note": "Surface or structured parking lot, organized layout, 1~3F",
     },
     "일반산업단지(공장용지)": {
         "Primary Function": "General industrial",
-        "mass_types": ["Slab bar — 판상형"],
-        "Height Strategy": "Uniform low-rise",
-        "bcr_level": "High", "far_level": "Medium", "floor_level": "Low",
-        "Primary Façade Material": ["metal", "concrete"],
-        "Landscape Density Strategy": "Sparse planting",
-        "prompt_note": "General industrial zone, large-footprint factory buildings",
+        "floor_level": "Low",
+        "prompt_note": "General industrial zone, large-footprint factory buildings, low-rise",
     },
     "첨단물류단지": {
         "Primary Function": "Logistics / Distribution",
-        "mass_types": ["Slab bar — 판상형"],
-        "Height Strategy": "Uniform low-rise",
-        "bcr_level": "High", "far_level": "Medium", "floor_level": "Low",
-        "Primary Façade Material": ["metal"],
-        "Landscape Density Strategy": "Sparse planting",
-        "prompt_note": "Advanced logistics center, large-scale warehouse buildings",
+        "floor_level": "Low",
+        "prompt_note": "Advanced logistics center, large-scale warehouse buildings, truck access roads",
     },
     "복합용지(혼합개발)": {
         "Primary Function": "Mixed urban fabric",
-        "mass_types": ["Podium + tower — 포디움+타워"],
-        "Height Strategy": "Stepped skyline",
-        "bcr_level": "Medium–High", "far_level": "High", "floor_level": "Medium–High",
-        "Primary Façade Material": ["glass", "concrete"],
-        "Landscape Density Strategy": "Street tree dominant",
+        "floor_level": "Medium–High",
         "prompt_note": "Mixed-use development zone, podium base with tower elements",
     },
 }
 
-FLOOR_MAP = {
-    "Very low": "1–3F", "Low": "2–5F", "Medium": "4–8F",
-    "Medium–High": "7–15F", "High": "30F+",
-}
 PARK_PF = "Park / Open space"
 PRESET_KEYS = list(ZONE_PRESETS_SIMPLE.keys())
 PRESET_OPTIONS = ["[직접입력]"] + PRESET_KEYS
@@ -375,6 +280,36 @@ def ensure_session():
 ensure_session()
 
 # ──────────────────────────────────────────────────────────────
+# 기본 테이블
+# ──────────────────────────────────────────────────────────────
+def make_default_table():
+    defaults = [
+        ("단독주택",         (255, 255, 127), "단독주택",               "",                                                                  10000.0),
+        ("공원",             (  0, 165,   0), "근린공원·주제공원",      "",                                                                  15000.0),
+        ("녹지·완충녹지",    (191, 255, 127), "근린공원·주제공원",      "",                                                                   8000.0),
+        ("공공청사",         (180, 220, 200), "공공청사·행정시설",      "",                                                                   5000.0),
+        ("주차장",           (137, 137, 137), "주차장",                 "",                                                                   3000.0),
+        ("숙박시설",         (255, 191, 127), "[직접입력]",             "resort hotel with amenity facilities, 5~10F, warm facade",          12000.0),
+        ("복합커뮤니티시설", (255, 159, 127), "[직접입력]",             "community center with multipurpose hall and outdoor plaza",           4000.0),
+        ("치유의숲",         (127, 255,   0), "[직접입력]",             "healing forest with walking trails, meditation zones, no buildings", 20000.0),
+    ]
+    return [
+        {
+            "name": n,
+            "r": rgb[0], "g": rgb[1], "b": rgb[2],
+            "preset": preset,
+            "custom_desc": custom_desc,
+            "area_sqm": area,
+            "tolerance": 25,
+            "enabled": True,
+        }
+        for n, rgb, preset, custom_desc, area in defaults
+    ]
+
+if not st.session_state.land_use_table:
+    st.session_state.land_use_table = make_default_table()
+
+# ──────────────────────────────────────────────────────────────
 # 이미지 유틸
 # ──────────────────────────────────────────────────────────────
 def pil_to_png_bytes(img: Image.Image) -> bytes:
@@ -386,7 +321,7 @@ def bytes_to_pil(b: bytes) -> Image.Image:
     return Image.open(BytesIO(b)).convert("RGB")
 
 # ──────────────────────────────────────────────────────────────
-# 범례 이미지 자동 생성
+# 범례 이미지 — UI 확인용
 # ──────────────────────────────────────────────────────────────
 def build_legend_image(table: list):
     enabled = [row for row in table if row.get("enabled", True)]
@@ -403,37 +338,30 @@ def build_legend_image(table: list):
 
     img = Image.new("RGB", (img_w, img_h), (255, 255, 255))
     draw = ImageDraw.Draw(img)
-
     draw.rectangle([0, 0, img_w, header_h], fill=(30, 30, 30))
     draw.text((padding, 8), "LAND USE LEGEND", fill=(255, 255, 255))
 
     for i, row in enumerate(enabled):
         y = header_h + padding + i * row_h
         r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
-
-        draw.rectangle(
-            [padding, y, padding + chip_w, y + chip_h],
-            fill=(r, g, b), outline=(80, 80, 80), width=1
-        )
+        draw.rectangle([padding, y, padding + chip_w, y + chip_h],
+                       fill=(r, g, b), outline=(80, 80, 80), width=1)
         draw.text((padding, y + chip_h + 1), "R%d G%d B%d" % (r, g, b), fill=(140, 140, 140))
 
-        name = row.get("name", "")
         preset_key = row.get("preset", "")
         custom = row.get("custom_desc", "").strip()
-
-        # 영문 라벨 생성 — 한글 name 대신 영문 desc 우선 사용
         if custom:
-            label_main = custom[:40]
+            label_main = custom[:45]
             label_sub = ""
         elif preset_key in ZONE_PRESETS_SIMPLE:
             p = ZONE_PRESETS_SIMPLE[preset_key]
             label_main = p.get("Primary Function", preset_key)[:45]
             label_sub = p.get("prompt_note", "")[:55]
         else:
-            label_main = name[:45]  # 한글이라도 일단 출력
+            label_main = row.get("name", "")[:45]
             label_sub = ""
 
-        draw.text((text_x, y + 4),  label_main, fill=(20, 20, 20))
+        draw.text((text_x, y + 4), label_main, fill=(20, 20, 20))
         if label_sub:
             draw.text((text_x, y + 20), label_sub, fill=(90, 90, 90))
         draw.line([padding, y + row_h - 1, img_w - padding, y + row_h - 1],
@@ -442,22 +370,17 @@ def build_legend_image(table: list):
     return pil_to_png_bytes(img)
 
 # ──────────────────────────────────────────────────────────────
-# 픽셀 빈도 기반 색상 자동 추출 (벡터 도면 최적화)
+# 색상 자동 추출
 # ──────────────────────────────────────────────────────────────
 def extract_dominant_colors(img_bytes: bytes, n_colors: int = 12) -> list:
     if not (CV2_AVAILABLE and np is not None):
         return []
     arr = np.array(bytes_to_pil(img_bytes)).reshape(-1, 3)
-
-    # 검정 배경 제거
     arr = arr[arr.sum(axis=1) > 60]
-    # 흰색·회백색(도로선) 제거
     arr = arr[~((arr[:, 0] > 230) & (arr[:, 1] > 230) & (arr[:, 2] > 230))]
-
     if len(arr) < 100:
         return []
 
-    # 4단위 양자화 → 안티앨리어싱 노이즈 흡수
     arr_q = (arr // 4 * 4).astype(np.int32)
     keys = arr_q[:, 0] * 65536 + arr_q[:, 1] * 256 + arr_q[:, 2]
     unique, counts = np.unique(keys, return_counts=True)
@@ -470,18 +393,13 @@ def extract_dominant_colors(img_bytes: bytes, n_colors: int = 12) -> list:
         g = (key // 256) % 256
         r = (key // 65536) % 256
         ratio = counts[idx] / total
-
         if ratio < 0.005:
             break
-
-        # 유사색 병합 (L1 거리 30 이내)
         if any(abs(r - er) + abs(g - eg) + abs(b - eb) < 30 for er, eg, eb, _ in results):
             continue
-
         results.append((r, g, b, float(ratio)))
         if len(results) >= n_colors:
             break
-
     return results
 
 # ──────────────────────────────────────────────────────────────
@@ -498,11 +416,10 @@ def extract_zone_masks(landuse_bytes: bytes, table: list) -> dict:
             continue
         r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
         tol = int(row.get("tolerance", 25))
-        lo = np.array([max(0, r - tol), max(0, g - tol), max(0, b - tol)], dtype=np.uint8)
-        hi = np.array([min(255, r + tol), min(255, g + tol), min(255, b + tol)], dtype=np.uint8)
+        lo = np.array([max(0, r-tol), max(0, g-tol), max(0, b-tol)], dtype=np.uint8)
+        hi = np.array([min(255, r+tol), min(255, g+tol), min(255, b+tol)], dtype=np.uint8)
         mask = cv2.inRange(rgb_arr, lo, hi)
-        k = np.ones((5, 5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
         area_px = int(np.count_nonzero(mask))
         if area_px < 50:
             continue
@@ -533,56 +450,141 @@ def describe_position(cx, cy, w, h) -> str:
     return "%s-%s part of the site" % (tb, lr)
 
 # ──────────────────────────────────────────────────────────────
-# Site 마스크 + 위성 합성
+# 공원/녹지 여부 판별
 # ──────────────────────────────────────────────────────────────
-def extract_site_mask_from_landuse(landuse_bytes: bytes, table: list):
+def should_keep_color(row: dict) -> bool:
+    """공원/녹지/수공간 → 색상 유지 / 건물 구역 → 흰백판"""
+    preset = row.get("preset", "")
+    custom = row.get("custom_desc", "").strip().lower()
+
+    no_building_presets = {"근린공원·주제공원", "하천·수변공간", "광장·공공공지"}
+    if preset in no_building_presets:
+        return True
+
+    no_building_keywords = [
+        "no buildings", "park", "trail", "forest", "golf",
+        "pool", "water", "green buffer", "landscape", "garden",
+        "walking", "pedestrian", "plaza", "retention", "healing",
+        "open space", "lawn", "wetland",
+    ]
+    return any(k in custom for k in no_building_keywords)
+
+# ──────────────────────────────────────────────────────────────
+# 핵심: 합성 입력 이미지 생성
+# 위성(배경) + site 내부 흰색 + 검정 경계선 + [Z] 레이블
+# 공원/녹지 구역은 원본 색상 유지
+# ──────────────────────────────────────────────────────────────
+def build_composite_with_labels(
+    landuse_bytes: bytes, table: list, sat_bytes: bytes = None
+) -> tuple:
     if not (CV2_AVAILABLE and np is not None):
-        return None, None
-    rgb_arr = np.array(bytes_to_pil(landuse_bytes))
-    h, w = rgb_arr.shape[:2]
-    full_mask = np.zeros((h, w), dtype=np.uint8)
-    for row in table:
+        return landuse_bytes, {}
+
+    landuse_arr = np.array(bytes_to_pil(landuse_bytes))
+    h, w = landuse_arr.shape[:2]
+
+    # 1. 배경 준비 (위성 or 흰색)
+    if sat_bytes:
+        sat = bytes_to_pil(sat_bytes)
+        try:
+            sat = sat.resize((w, h), Image.Resampling.LANCZOS)
+        except AttributeError:
+            sat = sat.resize((w, h), Image.LANCZOS)
+        result = np.array(sat).copy()
+    else:
+        result = np.ones((h, w, 3), dtype=np.uint8) * 255
+
+    # 2. 검정 경계선 마스크
+    gray = cv2.cvtColor(landuse_arr, cv2.COLOR_RGB2GRAY)
+    _, black_mask = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY_INV)
+
+    # 3. 흰색 외부 배경 마스크
+    white_bg = (
+        (landuse_arr[:, :, 0] > 240) &
+        (landuse_arr[:, :, 1] > 240) &
+        (landuse_arr[:, :, 2] > 240)
+    )
+
+    # 4. site 내부 → 흰색
+    site_interior = ~white_bg & (black_mask == 0)
+    result[site_interior] = [255, 255, 255]
+
+    # 5. 검정 경계선 복원
+    result[black_mask > 0] = [30, 30, 30]
+
+    # 6. 용도 기준 Z번호 그룹화
+    def get_zone_key(row: dict) -> str:
+        preset = row.get("preset", "[직접입력]")
+        custom = row.get("custom_desc", "").strip()
+        if custom:
+            return "custom::" + custom[:40]
+        return preset
+
+    zone_key_to_z = {}
+    zone_label_map = {}
+    z_counter = [1]
+
+    def get_z_num(row):
+        key = get_zone_key(row)
+        if key not in zone_key_to_z:
+            zone_key_to_z[key] = z_counter[0]
+            zone_label_map["Z%d" % z_counter[0]] = row
+            z_counter[0] += 1
+        return zone_key_to_z[key]
+
+    # 7. 구역별 처리
+    for i, row in enumerate(table):
         if not row.get("enabled", True):
             continue
         r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
         tol = int(row.get("tolerance", 25))
-        lo = np.array([max(0, r - tol), max(0, g - tol), max(0, b - tol)], dtype=np.uint8)
-        hi = np.array([min(255, r + tol), min(255, g + tol), min(255, b + tol)], dtype=np.uint8)
-        full_mask = cv2.bitwise_or(full_mask, cv2.inRange(rgb_arr, lo, hi))
-    full_mask = cv2.morphologyEx(
-        full_mask, cv2.MORPH_CLOSE, np.ones((20, 20), np.uint8), iterations=4
-    )
-    return full_mask, rgb_arr
+        lo = np.array([max(0, r-tol), max(0, g-tol), max(0, b-tol)], dtype=np.uint8)
+        hi = np.array([min(255, r+tol), min(255, g+tol), min(255, b+tol)], dtype=np.uint8)
+        mask = cv2.inRange(landuse_arr, lo, hi)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
+        if np.count_nonzero(mask) < 200:
+            continue
 
-def apply_satellite_outside(sat_bytes: bytes, generated_bytes: bytes, site_mask) -> bytes:
-    if not (CV2_AVAILABLE and np is not None) or site_mask is None:
-        return generated_bytes
-    try:
-        sat = bytes_to_pil(sat_bytes)
-        gen = bytes_to_pil(generated_bytes)
-        w_sat, h_sat = sat.size
-        try:
-            gen_r = gen.resize((w_sat, h_sat), Image.Resampling.LANCZOS)
-        except AttributeError:
-            gen_r = gen.resize((w_sat, h_sat), Image.LANCZOS)
-        gen_arr = np.array(gen_r)
-        sat_arr = np.array(sat)
-        mask_r = cv2.resize(site_mask, (w_sat, h_sat), interpolation=cv2.INTER_NEAREST)
+        if should_keep_color(row):
+            # 공원/녹지 → 원본 색상 복원
+            result[mask > 0] = [r, g, b]
+            continue
 
-        # 추가: 생성 이미지에서 검정 픽셀도 외부로 처리
-        black_pixels = (gen_arr.sum(axis=2) < 30)
-        result = gen_arr.copy()
-        result[mask_r == 0] = sat_arr[mask_r == 0]
-        result[black_pixels] = sat_arr[black_pixels]  # 검정 배경 → 위성으로 교체
-        return pil_to_png_bytes(Image.fromarray(result))
-    except Exception:
-        return generated_bytes
+        # 건물 구역 → Z레이블 삽입
+        z_num = get_z_num(row)
+        label_text = "[Z%d]" % z_num
+
+        num_comp, _, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        for ci in range(1, num_comp):
+            comp_area = stats[ci, cv2.CC_STAT_AREA]
+            if comp_area < 100:  # 너무 작은 파편 제외
+                continue
+            cx = int(centroids[ci][0])
+            cy = int(centroids[ci][1])
+
+            font_scale = max(0.4, min(1.5, comp_area ** 0.5 / 130))
+            thickness = max(1, int(font_scale * 2))
+            (tw, th), _ = cv2.getTextSize(
+                label_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
+            )
+            tx = max(tw // 2, min(w - tw, cx - tw // 2))
+            ty = max(th, min(h - 4, cy + th // 2))
+
+            # 흰색 배경 박스
+            cv2.rectangle(result,
+                (tx - 2, ty - th - 2), (tx + tw + 2, ty + 2),
+                (255, 255, 255), -1)
+            # 레이블 텍스트
+            cv2.putText(result, label_text, (tx, ty),
+                cv2.FONT_HERSHEY_SIMPLEX, font_scale,
+                (20, 20, 20), thickness, cv2.LINE_AA)
+
+    return pil_to_png_bytes(Image.fromarray(result)), zone_label_map
 
 # ──────────────────────────────────────────────────────────────
-# 흰색 구역 경계선 제거
+# 흰색 경계선 제거 (생성 후처리)
 # ──────────────────────────────────────────────────────────────
 def remove_white_lines(img_bytes: bytes) -> bytes:
-    """생성 이미지의 흰색 구역 경계선 제거"""
     if not (CV2_AVAILABLE and np is not None):
         return img_bytes
     try:
@@ -611,298 +613,34 @@ def remove_white_lines(img_bytes: bytes) -> bytes:
 # ──────────────────────────────────────────────────────────────
 FIXED_QUALITY_OBLIQUE = (
     "RENDER QUALITY — PHOTOREALISTIC (competition-grade archviz):\n"
-    "\n"
-    "Lighting:\n"
-    "- Late-afternoon golden-hour sun at low angle. Strong directional shadows across facades and rooftops.\n"
-    "- Warm orange-gold on sunlit faces. Cool blue-grey in shadow areas. High contrast, filmic.\n"
-    "- Soft bounce light filling shadows. Ambient occlusion at ground contacts.\n"
-    "\n"
-    "Glass / windows:\n"
-    "- Fresnel reflections: bright at edges, semi-transparent at center.\n"
-    "- Sky color and surroundings reflected in glass surfaces.\n"
-    "- Sharp sun glints on window frames and curtain wall edges.\n"
-    "- Every window must look like real glass — NO flat colored rectangles.\n"
-    "\n"
-    "Brick / concrete facades:\n"
-    "- Visible mortar joints, surface grain, micro-weathering.\n"
-    "- Sharp shadow lines under overhangs, balconies, cornices.\n"
-    "- Flat roofs: concrete texture, parapet shadow lines visible.\n"
-    "\n"
-    "Vegetation:\n"
-    "- 3D volumetric tree canopies. Light passes through leaf edges.\n"
-    "- Distinct tree crown shapes. Shadow cast on ground and adjacent surfaces.\n"
-    "- Ground cover: grass texture, gravel, paving patterns — not flat green fills.\n"
-    "\n"
-    "Roads / ground:\n"
-    "- Asphalt texture with fine grain. Curb edges casting thin shadow lines.\n"
-    "- Sidewalk paving pattern visible. Crosswalk markings where appropriate.\n"
-    "\n"
-    "Overall: no blur, no cartoon shading, no flat uniform colors. Every pixel physically grounded.\n"
+    "Lighting: Late-afternoon golden-hour sun, low angle. Strong directional shadows. "
+    "Warm orange-gold on sunlit faces. Cool blue-grey in shadows. Filmic HDR.\n"
+    "Glass: Fresnel reflections, sky color reflected, sharp sun glints on curtain walls.\n"
+    "Brick/concrete: Visible mortar joints, surface grain, shadow lines under overhangs.\n"
+    "Vegetation: 3D volumetric tree canopies, translucent leaf edges, cast shadows.\n"
+    "Roads: Asphalt texture, curb shadow lines, sidewalk paving patterns.\n"
+    "No blur, no cartoon shading, no flat uniform colors. Photorealistic throughout.\n"
 )
 
-SKIP_COLORS = {(255, 255, 255)}  # 도로(흰색)는 zone 채우기 대상 아니므로 제외
-
-def simplify_zone_desc(desc: str) -> str:
-    d = (desc or "").strip()
-    replacements = [
-        ("public park with dense trees, walking paths, open lawn", "public park, dense trees, lawn, no buildings"),
-        ("green buffer zone with natural vegetation, no buildings", "green buffer zone, natural vegetation, no buildings"),
-        ("low-rise detached housing, 2~3F, private gardens", "detached housing, 2~3F, private gardens"),
-        ("small neighborhood park, trees and seating areas", "neighborhood park, trees and seating, no buildings"),
-        ("outdoor performance plaza, stage and open gathering space", "performance plaza, stage and open space"),
-        ("pedestrian street, paving, no vehicles", "pedestrian street, paving, no vehicles"),
-        ("community complex with cultural and welfare facilities, 2~5F", "community complex, 2~5F buildings"),
-        ("walking trail through green landscape, natural path", "walking trail network, integrated with landscape, no buildings"),
-        ("smart farm with greenhouse structures and agricultural facilities", "smart farm, greenhouse clusters"),
-        ("infinity pool with leisure deck, resort-style design", "infinity pool, leisure deck, no buildings"),
-        ("stormwater retention basin, water surface and landscape edges", "retention basin, water surface, landscape edges, no buildings"),
-        ("local convenience facilities, small-scale mixed use buildings", "local mixed-use buildings, small scale"),
-        ("parking lot or parking structure, organized layout", "parking area, structured layout"),
-        ("healing forest with trails and meditation zones, no buildings", "healing forest, trails and meditation zones, no buildings"),
-        ("resort condominium, mid-rise, leisure-oriented design", "resort condominium, mid-rise buildings"),
-        ("open-air farmers market, stalls and small pavilions", "farmers market, stalls and small pavilions"),
-        ("park golf course, open grass field with light facilities", "park golf course, open grass field, no buildings"),
-        ("agri-processing and rural experience complex, low-rise cluster", "agri-processing complex, low-rise cluster"),
-    ]
-    for old, new in replacements:
-        if d == old:
-            return new
-    return d
-
-def is_no_building_zone(desc: str) -> bool:
-    d = (desc or "").lower()
-    keywords = ["park", "green buffer", "trail", "retention basin",
-                "healing forest", "golf course", "pool", "no buildings"]
-    return any(k in d for k in keywords)
-
-
-def describe_color_name(r: int, g: int, b: int) -> str:
-    special = {
-        (150, 0, 200):   "deep purple",
-        (200, 0, 255):   "bright purple",
-        (255, 0, 255):   "magenta",
-        (0, 150, 0):     "dark green",
-        (0, 200, 0):     "bright green",
-        (100, 255, 100): "light green",
-        (50, 100, 50):   "forest green",
-        (100, 180, 80):  "olive green",
-        (255, 255, 0):   "bright yellow",
-        (255, 150, 0):   "orange",
-        (150, 100, 50):  "brown",
-        (0, 200, 255):   "cyan",
-        (100, 200, 255): "sky blue",
-        (0, 100, 255):   "blue",
-        (120, 120, 120): "grey",
-        (255, 255, 255): "white",
-        (0, 0, 0):       "black",
-    }
-    if (r, g, b) in special:
-        return special[(r, g, b)]
-
-    candidates = [
-        ((255, 255, 0),   "yellow"),
-        ((0, 180, 0),     "green"),
-        ((0, 180, 255),   "cyan"),
-        ((255, 0, 255),   "magenta"),
-        ((150, 100, 50),  "brown"),
-        ((120, 120, 120), "grey"),
-    ]
-    best_name = "colored"
-    best_dist = 10**9
-    for (cr, cg, cb), name in candidates:
-        dist = abs(r - cr) + abs(g - cg) + abs(b - cb)
-        if dist < best_dist:
-            best_dist = dist
-            best_name = name
-    return best_name
-
-
-def make_clean_bg_like_landuse(landuse_bytes: bytes, site_mask) -> bytes:
-    if not (CV2_AVAILABLE and np is not None) or site_mask is None:
-        return landuse_bytes
-    try:
-        arr = np.array(bytes_to_pil(landuse_bytes))
-        h, w = arr.shape[:2]
-        bg = np.full((h, w, 3), 255, dtype=np.uint8)  # 흡 배경
-        bg[site_mask > 0] = arr[site_mask > 0]        # site 내부만 원본 유지
-        return pil_to_png_bytes(Image.fromarray(bg))
-    except Exception:
-        return landuse_bytes
-
-
-def build_white_mask_landuse_input(landuse_bytes, sat_bytes, site_mask):
-    """
-    PASS1 입력용:
-    - site 내부: 원래 토지이용 색상 유지
-    - site 외부: 흰색(white mask concept)
-    """
-    if not (CV2_AVAILABLE and np is not None) or site_mask is None:
-        return landuse_bytes
-    try:
-        land_arr = np.array(bytes_to_pil(landuse_bytes))
-        h, w = land_arr.shape[:2]
-        result = np.full((h, w, 3), 255, dtype=np.uint8)
-        result[site_mask > 0] = land_arr[site_mask > 0]
-        return pil_to_png_bytes(Image.fromarray(result))
-    except Exception:
-        return landuse_bytes
-
-
-def should_keep_color(row):
-    """공원/녹지/도로/수공간 계열 → 색상 유지, 건물 구역 → 흰백판"""
-    preset = row.get("preset", "")
-    custom = row.get("custom_desc", "").strip().lower()
-
-    no_building_presets = {
-        "근린공원·주제공원", "하천·수변공간", "광장·공공공지",
-    }
-    if preset in no_building_presets:
-        return True
-
-    no_building_keywords = [
-        "no buildings", "park", "trail", "forest", "golf",
-        "pool", "water", "green buffer", "landscape", "garden",
-        "walking", "pedestrian", "plaza", "retention", "healing",
-        "open space", "lawn", "wetland",
-    ]
-    if any(k in custom for k in no_building_keywords):
-        return True
-
-    return False
-
-
-def build_composite_with_labels(landuse_bytes, table, sat_bytes=None):
-    """
-    합성 입력 이미지 생성:
-    위성사진(배경) + site 내부 흰색 + 검정 경계선 + [Z] 레이블
-    반환: (composite_bytes, zone_label_map)
-    """
-    if not (CV2_AVAILABLE and np is not None):
-        return landuse_bytes, {}
-
-    landuse_arr = np.array(bytes_to_pil(landuse_bytes))
-    h, w = landuse_arr.shape[:2]
-
-    # ── 1. 위성사진 배경 준비 ────────────────────────────
-    if sat_bytes:
-        sat = bytes_to_pil(sat_bytes)
-        try:
-            sat = sat.resize((w, h), Image.Resampling.LANCZOS)
-        except AttributeError:
-            sat = sat.resize((w, h), Image.LANCZOS)
-        base = np.array(sat)
-    else:
-        base = np.ones((h, w, 3), dtype=np.uint8) * 255
-
-    result = base.copy()
-
-    # ── 2. 검정 경계선 마스크 추출 ───────────────────────
-    gray = cv2.cvtColor(landuse_arr, cv2.COLOR_RGB2GRAY)
-    _, black_mask = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY_INV)
-
-    # ── 3. 흰색 외부 배경 마스크 ─────────────────────────
-    white_bg = (
-        (landuse_arr[:, :, 0] > 240) &
-        (landuse_arr[:, :, 1] > 240) &
-        (landuse_arr[:, :, 2] > 240)
-    )
-
-    # ── 4. site 내부 흰색으로 채우기 ─────────────────────
-    site_interior = ~white_bg & (black_mask == 0)
-    result[site_interior] = [255, 255, 255]
-
-    # ── 5. 검정 경계선 복원 ──────────────────────────────
-    result[black_mask > 0] = [30, 30, 30]
-
-    # ── 6. 용도 기준 Z번호 그룹화 ────────────────────────
-    def get_zone_key(row):
-        preset = row.get("preset", "[직접입력]")
-        custom = row.get("custom_desc", "").strip()
-        if custom:
-            return "custom::" + custom[:40]
-        return preset
-
-    zone_key_to_z = {}
-    zone_label_map = {}
-    z_counter = [1]
-
-    def get_z_num(row):
-        key = get_zone_key(row)
-        if key not in zone_key_to_z:
-            zone_key_to_z[key] = z_counter[0]
-            zone_label_map["Z%d" % z_counter[0]] = row
-            z_counter[0] += 1
-        return zone_key_to_z[key]
-
-    # ── 7. 구역별 처리 ───────────────────────────────────
-    for i, row in enumerate(table):
-        if not row.get("enabled", True):
-            continue
-        r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
-        tol = int(row.get("tolerance", 25))
-        lo = np.array([max(0, r - tol), max(0, g - tol), max(0, b - tol)], dtype=np.uint8)
-        hi = np.array([min(255, r + tol), min(255, g + tol), min(255, b + tol)], dtype=np.uint8)
-        mask = cv2.inRange(landuse_arr, lo, hi)
-        k = np.ones((5, 5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
-        if np.count_nonzero(mask) < 200:
-            continue
-
-        if should_keep_color(row):
-            # 공원/녹지/도로 → 원본 색상 복원 (흰백판에서 되돌리기)
-            result[mask > 0] = [r, g, b]
-            continue
-
-        # 건물 구역 → Z레이블 삽입
-        z_num = get_z_num(row)
-        label_text = "[Z%d]" % z_num
-
-        num_comp, comp_map, stats, centroids = cv2.connectedComponentsWithStats(
-            mask, connectivity=8
-        )
-        for ci in range(1, num_comp):
-            if stats[ci, cv2.CC_STAT_AREA] < 500:
-                continue
-            cx = int(centroids[ci][0])
-            cy = int(centroids[ci][1])
-            comp_area = stats[ci, cv2.CC_STAT_AREA]
-
-            font_scale = max(0.4, min(1.5, comp_area ** 0.5 / 130))
-            thickness = max(1, int(font_scale * 2))
-            (tw, th), _ = cv2.getTextSize(
-                label_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
-            )
-            tx = max(tw // 2, min(w - tw, cx - tw // 2))
-            ty = max(th, min(h - 4, cy + th // 2))
-
-            cv2.rectangle(result,
-                (tx - 2, ty - th - 2), (tx + tw + 2, ty + 2),
-                (255, 255, 255), -1)
-            cv2.putText(result, label_text, (tx, ty),
-                cv2.FONT_HERSHEY_SIMPLEX, font_scale,
-                (20, 20, 20), thickness, cv2.LINE_AA)
-
-    return pil_to_png_bytes(Image.fromarray(result)), zone_label_map
-
-
-def build_pass1_prompt(table, zone_masks, site_area, zone_label_map=None):
+def build_pass1_prompt(
+    table: list, zone_masks: dict, site_area: float, zone_label_map: dict = None
+) -> str:
     lines = [
         "You are given ONE image: a masterplan canvas with two types of zones.",
         "",
         "ZONE TYPES IN THE IMAGE:",
         "- WHITE zones with [Z1], [Z2]... labels = building zones.",
-        "  Fill these with detailed architecture matching the zone type below.",
-        "- COLORED zones (green, blue, brown etc.) = parks, greenery, water, open space.",
-        "  These are already correctly colored. Enhance with landscape detail only.",
-        "  Do NOT place buildings in colored zones.",
+        "  Fill these with detailed architecture matching the zone type listed below.",
+        "- COLORED zones (green, blue, brown, etc.) = parks, greenery, water, open space.",
+        "  These zones are already colored correctly. Enhance with landscape detail only.",
+        "  Do NOT place any buildings in colored zones.",
         "",
-        "TASK:",
-        "Transform this into a premium top-down 2D urban masterplan illustration.",
+        "TASK: Transform this into a premium top-down 2D urban masterplan illustration.",
         "",
         "ABSOLUTE RULES:",
         "- White [Z] zones: fill fully with buildings, roads, landscape per zone type.",
-        "- Colored zones: enhance with trees, texture, paths. No buildings.",
-        "- Preserve all zone boundaries exactly.",
+        "- Colored zones: enhance with trees, texture, paths. NO buildings.",
+        "- Preserve ALL zone boundaries exactly as shown. Do NOT redraw or merge zones.",
         "- NO text, labels, or zone numbers in the output.",
         "- TOTAL SITE AREA: ~%s sqm." % "{:,.0f}".format(site_area),
         "",
@@ -913,27 +651,17 @@ def build_pass1_prompt(table, zone_masks, site_area, zone_label_map=None):
         for z_key, row in zone_label_map.items():
             preset_key = row.get("preset", "[직접입력]")
             custom = row.get("custom_desc", "").strip()
-
             if custom:
                 desc = custom
             elif preset_key in ZONE_PRESETS_SIMPLE:
-                p = ZONE_PRESETS_SIMPLE[preset_key]
-                desc = p.get("prompt_note", p.get("Primary Function", ""))
+                desc = ZONE_PRESETS_SIMPLE[preset_key].get("prompt_note", preset_key)
             else:
                 desc = row.get("name", z_key)
-
-            is_park = (
-                preset_key in ZONE_PRESETS_SIMPLE and
-                ZONE_PRESETS_SIMPLE[preset_key].get("Primary Function") == PARK_PF
-            )
-            park_note = " | NO buildings" if is_park else ""
-
             user_area = row.get("area_sqm", 0)
             area_str = " | ~%s sqm" % "{:,.0f}".format(user_area) if user_area > 0 else ""
-
-            lines.append("  [%s] = %s%s%s" % (z_key, desc, park_note, area_str))
+            lines.append("  [%s] = %s%s" % (z_key, desc, area_str))
     else:
-        # fallback: 기존 RGB 방식
+        # fallback: RGB 방식
         seen_rgb = set()
         for row in table:
             if not row.get("enabled", True):
@@ -947,8 +675,7 @@ def build_pass1_prompt(table, zone_masks, site_area, zone_label_map=None):
             if custom:
                 desc = custom
             elif preset_key in ZONE_PRESETS_SIMPLE:
-                p = ZONE_PRESETS_SIMPLE[preset_key]
-                desc = p.get("prompt_note", p.get("Primary Function", ""))
+                desc = ZONE_PRESETS_SIMPLE[preset_key].get("prompt_note", preset_key)
             else:
                 desc = row.get("name", "")
             lines.append("  RGB(%d,%d,%d) = %s" % (r, g, b, desc))
@@ -956,29 +683,29 @@ def build_pass1_prompt(table, zone_masks, site_area, zone_label_map=None):
     lines += [
         "",
         "GEOMETRY LOCK — NON-NEGOTIABLE:",
-        "Preserve ALL zone boundaries exactly as shown.",
+        "Preserve ALL zone boundaries exactly as shown in the image.",
         "Insert content within existing zones only. Never redesign boundaries.",
         "",
         "OUTPUT STYLE — PREMIUM 2D MASTERPLAN:",
         "Style: high-end Korean urban development competition board.",
         "",
         "COLOR PALETTE:",
-        "Residential: warm beige/cream buildings, grey slate rooftops, soft shadows.",
-        "Parks/green: rich dark green canopy, light green lawn, circular tree shadows.",
+        "Residential: warm beige/cream buildings, grey slate rooftops, soft drop shadows.",
+        "Parks/green zones: rich dark green canopy over light green lawn, circular tree shadows.",
         "Public facilities: terracotta/orange accent roofs, civic plazas.",
-        "Water: vivid blue-green with ripple texture.",
-        "Roads: light warm grey, white lane markings, curb lines.",
+        "Water bodies: vivid blue-green with subtle ripple texture.",
+        "Roads: light warm grey asphalt, white lane markings, curb lines.",
         "",
         "BUILDINGS:",
-        "Many varied footprints — L-shape, U-shape, courtyard, slab, podium.",
-        "Each block unique. Realistic setbacks. Soft directional drop shadows.",
-        "Roof surfaces show material texture.",
+        "Many varied footprints — L-shape, U-shape, courtyard, slab bar, point tower, podium.",
+        "Each block unique in shape and orientation. Realistic setbacks per zone type.",
+        "Buildings cast soft directional drop shadows. Roof surfaces show material texture.",
         "",
         "LANDSCAPE:",
-        "Lush dark green canopies with circular shadow halos.",
-        "Light green lawns, shrubs, flower beds in public spaces.",
+        "Lush dark green tree canopies with circular shadow halos beneath.",
+        "Light green lawns, scattered shrubs, flower beds in public spaces.",
         "Dense street trees along all major roads.",
-        "Green zones: fully filled with rich landscape, never flat color.",
+        "Green and colored zones: fully filled with rich landscape, never flat solid color.",
         "",
         "QUALITY:",
         "Competition-board quality. Rich, dense, colorful, highly detailed.",
@@ -1003,8 +730,6 @@ def build_pass2_prompt(table: list) -> str:
         if not row.get("enabled", True):
             continue
         r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
-        if (r, g, b) in SKIP_COLORS:
-            continue
         if (r, g, b) in seen_rgb:
             continue
         seen_rgb.add((r, g, b))
@@ -1013,8 +738,7 @@ def build_pass2_prompt(table: list) -> str:
         if custom:
             desc = custom[:80]
         elif preset_key in ZONE_PRESETS_SIMPLE:
-            p = ZONE_PRESETS_SIMPLE[preset_key]
-            desc = p.get("prompt_note", "")
+            desc = ZONE_PRESETS_SIMPLE[preset_key].get("prompt_note", "")
         else:
             desc = row.get("name", "")
         lines.append("  RGB(%d,%d,%d) = %s" % (r, g, b, desc))
@@ -1079,21 +803,19 @@ def render_selector(outputs, sel_key, label):
         return None
     for row_start in range(0, len(outputs), 2):
         cols = st.columns(2, gap="medium")
-        for j, img_bytes in enumerate(outputs[row_start:row_start + 2]):
+        for j, img_bytes in enumerate(outputs[row_start:row_start+2]):
             i = row_start + j
             with cols[j]:
                 im = bytes_to_pil(img_bytes)
                 w, h = im.size
                 is_sel = (st.session_state[sel_key] == i)
                 border = "2px solid #2563EB" if is_sel else "1px solid #E5E7EB"
-                st.markdown(
-                    '<div style="border:%s;border-radius:10px;padding:6px;">' % border,
-                    unsafe_allow_html=True
-                )
-                st.image(im, caption="%s #%d — %dx%d" % (label, i + 1, w, h),
+                st.markdown('<div style="border:%s;border-radius:10px;padding:6px;">' % border,
+                            unsafe_allow_html=True)
+                st.image(im, caption="%s #%d — %dx%d" % (label, i+1, w, h),
                          use_container_width=True)
                 st.markdown('</div>', unsafe_allow_html=True)
-                btn_label = "선택됨 #%d" % (i + 1) if is_sel else "선택 #%d" % (i + 1)
+                btn_label = "선택됨 #%d" % (i+1) if is_sel else "선택 #%d" % (i+1)
                 if st.button(btn_label, key="%s_btn_%d" % (sel_key, i),
                              use_container_width=True,
                              type="primary" if is_sel else "secondary"):
@@ -1153,8 +875,8 @@ if cur_step == 0:
 
     with col_landuse:
         st.markdown("**토지이용계획도** ⭐ 필수")
-        st.caption("수치지형도 백판 위에 토지이용계획이 색상으로 표시된 이미지")
-        f2 = st.file_uploader("토지이용계획도 업로드", type=["png", "jpg", "jpeg"], key="up_landuse")
+        st.caption("색상으로 구역이 구분된 토지이용계획 이미지")
+        f2 = st.file_uploader("토지이용계획도 업로드", type=["png","jpg","jpeg"], key="up_landuse")
         if f2:
             st.session_state.img_landuse_bytes = f2.getvalue()
         if st.session_state.img_landuse_bytes:
@@ -1163,8 +885,8 @@ if cur_step == 0:
 
     with col_sat:
         st.markdown("**위성사진** (선택)")
-        st.caption("동일 위치 위성사진 — site 외부 컨텍스트 복원용")
-        f3 = st.file_uploader("위성사진 업로드", type=["png", "jpg", "jpeg"], key="up_sat")
+        st.caption("동일 위치 위성사진 — 합성 입력 이미지의 배경으로 사용됩니다")
+        f3 = st.file_uploader("위성사진 업로드", type=["png","jpg","jpeg"], key="up_sat")
         if f3:
             st.session_state.img_sat_bytes = f3.getvalue()
         if st.session_state.img_sat_bytes:
@@ -1188,8 +910,7 @@ if cur_step == 0:
 # ══════════════════════════════════════════════════════════════
 elif cur_step == 1:
     st.markdown('<div class="section-header">② 토지이용계획표</div>', unsafe_allow_html=True)
-    st.caption("각 토지이용 항목의 RGB 색상, 면적, 프리셋을 설정하세요.")
-    st.caption("⚠️ 자동 추출값은 참고용입니다. 정확한 RGB는 범례표를 보고 직접 수정하세요.")
+    st.caption("각 토지이용 항목의 RGB 색상, 면적, 용도 설명을 설정하세요.")
 
     # ── 엑셀 업로드 ──────────────────────────────────────────
     with st.expander("📥 엑셀로 토지이용계획표 불러오기", expanded=False):
@@ -1198,95 +919,143 @@ elif cur_step == 1:
         if st.button("📄 템플릿 다운로드"):
             import io as _io
             try:
-                import openpyxl as _openpyxl
-                _wb = _openpyxl.Workbook()
+                import openpyxl as _xl
+                _wb = _xl.Workbook()
                 _ws = _wb.active
                 _ws.title = "토지이용계획표"
                 _ws.append(["용도명", "R", "G", "B", "면적(㎡)", "용도설명(영문)", "프리셋"])
                 for _r in [
-                    ("단독주택", 255, 255, 127, 10000, "Low-rise detached housing, 2~3F, garden plots", "단독주택"),
-                    ("공원", 0, 165, 0, 15000, "Neighborhood park, tree canopy, walking paths", "근린공원·주제공원"),
-                    ("숙박시설", 255, 191, 127, 12000, "resort hotel with amenity facilities, 5~10F, warm facade", "[직접입력]"),
-                    ("치유의숲", 127, 255, 0, 20000, "healing forest with walking trails, meditation zones, no buildings", "[직접입력]"),
+                    ("단독주택",  255, 255, 127, 10000, "Low-rise detached housing, 2~3F, garden plots", "단독주택"),
+                    ("공원",        0, 165,   0, 15000, "Neighborhood park, tree canopy, walking paths", "근린공원·주제공원"),
+                    ("숙박시설",  255, 191, 127, 12000, "resort hotel with amenity facilities, 5~10F, warm facade", "[직접입력]"),
+                    ("치유의숲",  127, 255,   0, 20000, "healing forest with walking trails, meditation zones, no buildings", "[직접입력]"),
                 ]:
                     _ws.append(_r)
                 _buf = _io.BytesIO()
                 _wb.save(_buf)
                 _buf.seek(0)
                 st.download_button(
-                    "⬇️ 템플릿 xlsx 다운로드",
-                    data=_buf.getvalue(),
+                    "⬇️ 템플릿 xlsx 다운로드", data=_buf.getvalue(),
                     file_name="토지이용계획표_템플릿.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             except ImportError:
-                st.error("openpyxl 패키지가 필요합니다. pip install openpyxl")
+                st.error("openpyxl 패키지가 필요합니다.")
 
         xl_file = st.file_uploader("엑셀 파일 업로드 (.xlsx)", type=["xlsx"], key="xl_upload")
-
         if xl_file and st.button("테이블에 적용", type="primary", key="apply_xl"):
             try:
-                import openpyxl as _openpyxl
+                import openpyxl as _xl
                 import io as _io
-
-                _wb = _openpyxl.load_workbook(_io.BytesIO(xl_file.getvalue()), data_only=True)
+                _wb = _xl.load_workbook(_io.BytesIO(xl_file.getvalue()), data_only=True)
                 _ws = _wb.active
-
                 _new_rows = []
                 for _row in _ws.iter_rows(min_row=2, values_only=True):
-                    # 완전 빈 행 스킵
-                    if _row is None or all(v is None or str(v).strip() == "" for v in _row):
+                    if not _row or not _row[0] or str(_row[0]).strip() == "":
                         continue
-
-                    # 용도명 없으면 스킵
-                    if _row[0] is None or str(_row[0]).strip() == "":
-                        continue
-
-                    _name = str(_row[0]).strip()
-                    _r = max(0, min(255, int(float(_row[1] or 0))))
-                    _g = max(0, min(255, int(float(_row[2] or 0))))
-                    _b = max(0, min(255, int(float(_row[3] or 0))))
-                    _area = float(_row[4] or 0)
+                    _name   = str(_row[0]).strip()
+                    _r      = max(0, min(255, int(float(_row[1] or 0))))
+                    _g      = max(0, min(255, int(float(_row[2] or 0))))
+                    _b      = max(0, min(255, int(float(_row[3] or 0))))
+                    _area   = float(_row[4] or 0)
                     _custom = str(_row[5] or "").strip()
                     _preset = str(_row[6] or "[직접입력]").strip()
-
                     if _preset not in PRESET_OPTIONS:
                         _preset = "[직접입력]"
-
                     _new_rows.append({
-                        "name": _name,
-                        "r": _r,
-                        "g": _g,
-                        "b": _b,
-                        "preset": _preset,
-                        "custom_desc": _custom,
-                        "area_sqm": _area,
-                        "tolerance": 18,
-                        "enabled": True,
+                        "name": _name, "r": _r, "g": _g, "b": _b,
+                        "preset": _preset, "custom_desc": _custom,
+                        "area_sqm": _area, "tolerance": 25, "enabled": True,
                     })
-
-                # 업로드한 엑셀 내용만 남기기
-                st.session_state.land_use_table = _new_rows
-                st.session_state["_auto_colors"] = []
-
                 if _new_rows:
+                    st.session_state.land_use_table = _new_rows
                     st.success("%d개 항목 불러옴" % len(_new_rows))
+                    st.rerun()
                 else:
-                    st.warning("엑셀에서 불러온 유효 행이 없습니다. 2행부터 데이터를 확인하세요.")
-
-                st.rerun()
-
+                    st.warning("불러온 데이터가 없습니다.")
             except Exception as _e:
                 st.error("엑셀 파일 오류: %s" % str(_e))
+
+    # ── 색상 자동 추출 ──────────────────────────────────────
+    if st.session_state.img_landuse_bytes and CV2_AVAILABLE:
+        if st.button("🎨 이미지에서 색상 자동 추출"):
+            with st.spinner("색상 분석 중..."):
+                colors = extract_dominant_colors(st.session_state.img_landuse_bytes, n_colors=12)
+            st.session_state["_auto_colors"] = colors
+
+        colors = st.session_state.get("_auto_colors", [])
+        if colors:
+            st.caption("⚠️ 자동 추출값은 참고용입니다. 정확한 RGB는 범례표를 보고 직접 수정하세요.")
+            st.markdown("**감지된 주요 색상 — 각 색상을 용도에 매핑하세요**")
+            new_rows = []
+            for i in range(0, len(colors), 4):
+                chunk = colors[i:i+4]
+                ccols = st.columns(4)
+                for j, (r, g, b, ratio) in enumerate(chunk):
+                    hex_c = "#%02x%02x%02x" % (r, g, b)
+                    with ccols[j]:
+                        st.markdown(
+                            '<div style="background:%s;height:40px;border-radius:6px;'
+                            'border:1px solid #ccc;"></div>' % hex_c,
+                            unsafe_allow_html=True
+                        )
+                        st.caption("RGB(%d,%d,%d)  %.1f%%" % (r, g, b, ratio * 100))
+                        preset_sel = st.selectbox("용도", ["(무시)"] + PRESET_KEYS,
+                                                  key="auto_preset_%d" % (i+j))
+                        if preset_sel != "(무시)":
+                            new_rows.append({
+                                "name": preset_sel, "r": r, "g": g, "b": b,
+                                "preset": preset_sel, "custom_desc": "",
+                                "area_sqm": 10000.0, "tolerance": 20, "enabled": True,
+                            })
+            if st.button("+ 선택 항목을 테이블에 추가", type="primary", key="apply_auto"):
+                if new_rows:
+                    st.session_state.land_use_table = new_rows
+                    st.session_state["_auto_colors"] = []
+                    st.rerun()
+        st.markdown("---")
+
+    # ── 표준 항목 추가 ──────────────────────────────────────
+    with st.expander("+ 항목 추가", expanded=False):
+        lu_names = [lu[0] for lu in STANDARD_LAND_USES]
+        ac1, ac2 = st.columns([3, 1])
+        with ac1:
+            sel_lu = st.selectbox("표준 항목에서 선택", lu_names)
+        with ac2:
+            if st.button("추가", type="primary"):
+                idx = lu_names.index(sel_lu)
+                item = STANDARD_LAND_USES[idx]
+                st.session_state.land_use_table.append({
+                    "name": item[0], "r": item[1][0], "g": item[1][1], "b": item[1][2],
+                    "preset": item[2], "custom_desc": "",
+                    "area_sqm": 10000.0, "tolerance": 25, "enabled": True,
+                })
+                st.rerun()
+
+        st.markdown("**직접 입력**")
+        dc1, dc2, dc3, dc4, dc5 = st.columns([2, 0.7, 0.7, 0.7, 1.5])
+        new_name   = dc1.text_input("용도명", key="new_name")
+        new_r      = dc2.number_input("R", 0, 255, 128, key="new_r")
+        new_g      = dc3.number_input("G", 0, 255, 128, key="new_g")
+        new_b      = dc4.number_input("B", 0, 255, 128, key="new_b")
+        new_preset = dc5.selectbox("프리셋", PRESET_OPTIONS, key="new_preset")
+        if st.button("직접 추가"):
+            if new_name:
+                st.session_state.land_use_table.append({
+                    "name": new_name, "r": int(new_r), "g": int(new_g), "b": int(new_b),
+                    "preset": new_preset, "custom_desc": "",
+                    "area_sqm": 10000.0, "tolerance": 25, "enabled": True,
+                })
+                st.rerun()
 
     # ── 테이블 편집 ───────────────────────────────────────
     st.markdown('<div class="sub-label">토지이용 항목 목록</div>', unsafe_allow_html=True)
     table = st.session_state.land_use_table
 
     if not table:
-        st.info("현재 등록된 토지이용 항목이 없습니다. 엑셀 파일을 업로드해 테이블에 적용하세요.")
-    to_delete = []
+        st.info("등록된 항목이 없습니다. 엑셀 업로드 또는 직접 추가하세요.")
 
+    to_delete = []
     for i, row in enumerate(table):
         c_en, c_name, c_r, c_g, c_b, c_tol, c_area, c_preset, c_chip, c_del = st.columns(
             [0.4, 1.6, 0.6, 0.6, 0.6, 0.7, 1.1, 2.0, 0.5, 0.4]
@@ -1306,10 +1075,8 @@ elif cur_step == 1:
         if cur_preset not in PRESET_OPTIONS:
             cur_preset = "[직접입력]"
         table[i]["preset"] = c_preset.selectbox(
-            "", PRESET_OPTIONS,
-            index=PRESET_OPTIONS.index(cur_preset),
-            key="preset_%d" % i,
-            label_visibility="collapsed"
+            "", PRESET_OPTIONS, index=PRESET_OPTIONS.index(cur_preset),
+            key="preset_%d" % i, label_visibility="collapsed"
         )
 
         c_chip.markdown(
@@ -1320,14 +1087,13 @@ elif cur_step == 1:
         if c_del.button("x", key="del_%d" % i):
             to_delete.append(i)
 
-        # 직접입력 선택 시 설명 필드
         if table[i]["preset"] == "[직접입력]":
             table[i]["custom_desc"] = st.text_input(
                 "용도 설명 (영문 권장)",
                 value=row.get("custom_desc", ""),
                 key="cdesc_%d" % i,
                 placeholder="예: glamping resort with log cabins, 1~2F, natural wood facade",
-                help="이 설명이 범례 이미지와 프롬프트에 직접 사용됩니다"
+                help="이 설명이 프롬프트에 직접 사용됩니다"
             )
 
     if to_delete:
@@ -1336,7 +1102,7 @@ elif cur_step == 1:
 
     # ── RGB 추출 미리보기 ────────────────────────────────
     st.markdown('<div class="sub-label">RGB 추출 미리보기</div>', unsafe_allow_html=True)
-    if st.session_state.img_landuse_bytes and CV2_AVAILABLE:
+    if st.session_state.img_landuse_bytes and CV2_AVAILABLE and table:
         if st.button("구역 추출 미리보기", type="secondary"):
             with st.spinner("구역 추출 중..."):
                 zm = extract_zone_masks(st.session_state.img_landuse_bytes, table)
@@ -1381,7 +1147,7 @@ else:
     st.markdown('<div class="section-header">③ 이미지 생성</div>', unsafe_allow_html=True)
 
     if not GENAI_AVAILABLE:
-        st.error("google-genai 패키지가 없습니다. pip install google-genai 후 재시작하세요.")
+        st.error("google-genai 패키지가 없습니다.")
         st.stop()
 
     if not st.session_state.img_landuse_bytes:
@@ -1389,29 +1155,27 @@ else:
         st.stop()
 
     api_key = st.text_input("Google AI Studio API 키", type="password").strip()
-    model_name = st.selectbox(
-        "모델 선택",
-        [
-            "gemini-3-pro-image-preview",
-            "gemini-3.1-flash-image-preview",
-        ],
-        index=1
-    )
-    st.caption("선택된 모델: %s" % model_name)
+    model_name = "gemini-3-pro-image-preview"
+    st.caption("모델: %s" % model_name)
 
-    # ── 공통 준비 ──────────────────────────────────────────
     table = st.session_state.land_use_table
 
+    # ── 위성사진 상태 확인 + 재업로드 ──────────────────────
+    if st.session_state.img_sat_bytes:
+        st.success("✅ 위성사진 로드됨 — 합성 입력 이미지 배경으로 사용됩니다")
+    else:
+        st.warning("⚠️ 위성사진 없음 — 업로드하면 합성 이미지에 위성 배경이 적용됩니다")
+        with st.expander("위성사진 업로드", expanded=True):
+            f_sat_retry = st.file_uploader(
+                "위성사진 (.png/.jpg/.jpeg)",
+                type=["png","jpg","jpeg"],
+                key="up_sat_retry"
+            )
+            if f_sat_retry:
+                st.session_state.img_sat_bytes = f_sat_retry.getvalue()
+                st.rerun()
 
-    # 범례 이미지 — UI 미리보기 전용 (API 입력에는 사용 안 함)
-    legend_bytes = build_legend_image(table)
-    if legend_bytes:
-        st.markdown('<div class="sub-label">범례 이미지 미리보기 (UI 확인용)</div>',
-                    unsafe_allow_html=True)
-        st.image(bytes_to_pil(legend_bytes), width=420,
-                 caption="범례 이미지 — 사용자 확인용 미리보기 (PASS1 모델 입력에는 사용하지 않음)")
-
-    # 합성 입력 이미지 생성 (위성 + 흰백판 + Z레이블)
+    # ── 합성 입력 이미지 생성 ──────────────────────────────
     composite_bytes = None
     zone_label_map = {}
     if CV2_AVAILABLE:
@@ -1419,18 +1183,26 @@ else:
             composite_bytes, zone_label_map = build_composite_with_labels(
                 st.session_state.img_landuse_bytes,
                 table,
-                st.session_state.img_sat_bytes  # None이면 흰색 배경
+                st.session_state.img_sat_bytes
             )
 
     if composite_bytes:
         st.markdown('<div class="sub-label">합성 입력 이미지 (PASS1 입력용)</div>',
                     unsafe_allow_html=True)
         st.image(bytes_to_pil(composite_bytes),
-                 caption="위성배경 + 흰백판 + Z레이블",
+                 caption="위성배경 + 흰백판 + Z레이블 + 공원녹지 색상",
                  use_container_width=True)
 
     input_for_pass1 = composite_bytes if composite_bytes else st.session_state.img_landuse_bytes
 
+    # ── 범례 이미지 — UI 확인용 ────────────────────────────
+    legend_bytes = build_legend_image(table)
+    if legend_bytes:
+        st.markdown('<div class="sub-label">범례 이미지 (UI 확인용)</div>', unsafe_allow_html=True)
+        st.image(bytes_to_pil(legend_bytes), width=400,
+                 caption="범례 — 모델 입력에는 사용되지 않습니다")
+
+    # ── 프롬프트 생성 ──────────────────────────────────────
     zone_masks = {}
     if CV2_AVAILABLE:
         zone_masks = extract_zone_masks(st.session_state.img_landuse_bytes, table)
@@ -1440,17 +1212,16 @@ else:
     )
     pass2_prompt = build_pass2_prompt(table)
 
-    # 개발자 확인
+    # ── 개발자 확인 ───────────────────────────────────────
     dev_pw = st.text_input("개발자 비밀번호", type="password", key="dev_pw")
     if dev_pw == "126791":
         with st.expander("PASS1 프롬프트", expanded=False):
             st.code(pass1_prompt, language="text")
-            st.write("---- PROMPT LENGTH ----", len(pass1_prompt))
         with st.expander("PASS2 프롬프트", expanded=False):
             st.code(pass2_prompt, language="text")
-        if legend_bytes:
-            with st.expander("범례 이미지 (풀사이즈)", expanded=False):
-                st.image(bytes_to_pil(legend_bytes), use_container_width=True)
+        with st.expander("Z 레이블 매핑", expanded=False):
+            for z_key, row in zone_label_map.items():
+                st.write("[%s] → %s (%s)" % (z_key, row.get("name", ""), row.get("preset", "")))
 
     st.markdown("---")
 
@@ -1460,7 +1231,6 @@ else:
     def run_pass1():
         client = genai.Client(api_key=api_key)
         try:
-            # PASS1은 반드시 단일 이미지만 사용
             resp = client.models.generate_content(
                 model=model_name,
                 contents=make_contents(pass1_prompt, [input_for_pass1])
@@ -1468,7 +1238,6 @@ else:
             out = get_image_from_resp(resp)
             if out:
                 out = remove_white_lines(out)
-                # 위성 합성 불필요 — 이미 입력에 포함됨
                 st.session_state.pass1_outputs.append(out)
                 st.session_state.pass1_selected_idx = len(st.session_state.pass1_outputs) - 1
                 st.session_state.pass1_output_bytes = out
@@ -1500,21 +1269,12 @@ else:
         if st.session_state.pass1_outputs:
             st.caption("%d개 생성됨 (최대 5개)" % len(st.session_state.pass1_outputs))
 
-    if len(api_key) >= 10:
-        if st.button("모델 비교 테스트 (2회 연속 생성)", key="model_compare"):
-            st.session_state.pass1_outputs = []
-            st.session_state.pass1_selected_idx = 0
-            for _ in range(2):
-                with st.spinner("비교 생성 중 (%d/2)..." % (_ + 1)):
-                    run_pass1()
-            st.rerun()
-
     if st.session_state.pass1_outputs:
         st.markdown("**STEP 1 결과 — 최적 이미지 선택**")
         selected_p1 = render_selector(st.session_state.pass1_outputs, "pass1_selected_idx", "STEP1")
         if selected_p1:
             st.session_state.pass1_output_bytes = selected_p1
-        st.download_button("STEP 1 다운로드",
+        st.download_button("⬇️ STEP 1 다운로드",
                            data=st.session_state.pass1_output_bytes,
                            file_name="planvision_step1_2d.png", mime="image/png")
 
@@ -1527,13 +1287,12 @@ else:
     def run_pass2():
         client = genai.Client(api_key=api_key)
         try:
-            images = [
-                st.session_state.pass1_output_bytes,   # Image 1: 2D 배치도
-                st.session_state.img_landuse_bytes,    # Image 2: 원본 토지이용도
-            ]
             resp = client.models.generate_content(
                 model=model_name,
-                contents=make_contents(pass2_prompt, images)
+                contents=make_contents(pass2_prompt, [
+                    st.session_state.pass1_output_bytes,
+                    st.session_state.img_landuse_bytes,
+                ])
             )
             out = get_image_from_resp(resp)
             if out:
@@ -1571,7 +1330,7 @@ else:
         selected_p2 = render_selector(st.session_state.pass2_outputs, "pass2_selected_idx", "STEP2")
         if selected_p2:
             st.session_state.pass2_output_bytes = selected_p2
-        st.download_button("STEP 2 다운로드",
+        st.download_button("⬇️ STEP 2 다운로드",
                            data=st.session_state.pass2_output_bytes,
                            file_name="planvision_step2_3d.png", mime="image/png")
 
@@ -1579,9 +1338,8 @@ else:
 
         # ── PASS 3 ────────────────────────────────────────
         st.markdown("### STEP 3 — 각도 변환 (선택사항)")
-        p3_angle = st.selectbox(
-            "변환 각도", ["30° (저각도)", "45° (중각도)", "60° (준조감도)"], index=1
-        )
+        p3_angle = st.selectbox("변환 각도",
+                                ["30° (저각도)", "45° (중각도)", "60° (준조감도)"], index=1)
         angle_deg = {"30° (저각도)": 30, "45° (중각도)": 45, "60° (준조감도)": 60}[p3_angle]
         p3_disabled = len(api_key) < 10 or not st.session_state.pass2_output_bytes
 
@@ -1629,13 +1387,13 @@ else:
             selected_p3 = render_selector(st.session_state.pass3_outputs, "pass3_selected_idx", "STEP3")
             p3_final = selected_p3 or st.session_state.pass3_outputs[0]
             st.download_button(
-                "최종 다운로드 (STEP 3)", data=p3_final,
+                "⬇️ 최종 다운로드 (STEP 3)", data=p3_final,
                 file_name="planvision_final_%ddeg.png" % angle_deg,
                 mime="image/png", use_container_width=True
             )
         else:
             st.download_button(
-                "최종 다운로드 (STEP 2)",
+                "⬇️ 최종 다운로드 (STEP 2)",
                 data=st.session_state.pass2_output_bytes,
                 file_name="planvision_final_step2.png",
                 mime="image/png"
