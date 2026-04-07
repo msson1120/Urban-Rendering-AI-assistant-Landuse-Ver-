@@ -747,28 +747,32 @@ def build_white_mask_landuse_input(landuse_bytes, sat_bytes, site_mask):
     except Exception:
         return landuse_bytes
 
-def build_pass1_prompt(table, zone_masks, site_area):
+(table: list, zone_masks: dict, site_area: float) -> str:
     lines = [
         "You are given ONE image.",
         "",
-        "SITE PERIMETER — NON-NEGOTIABLE:",
-        "- White region = development site boundary",
-        "- Render ONLY inside the white region",
-        "- Everything outside the white region must remain unchanged",
+        "CRITICAL — IN-PLACE RENDERING ONLY:",
+        "The input image is already the final urban plan.",
+        "All colored zones and roads are fixed geometry.",
+        "You must NOT redesign anything.",
         "",
-        "CRITICAL GEOMETRY LOCK:",
-        "- The input image already defines the final layout",
-        "- All colored zones and roads are fixed geometry",
-        "- This is not a concept redesign task",
-        "- Do not invent, rearrange, expand, simplify, or reinterpret the plan",
-        "- Do not create new blocks, new roads, or new open spaces",
-        "- The only allowed action is to render detailed contents inside the existing colored zones",
+        "CRITICAL — ROAD LOCK:",
+        "RGB(0,0,0) areas are roads.",
+        "- Preserve road geometry exactly: width, alignment, intersections, and boundaries",
+        "- Do NOT move, widen, narrow, bend, or reshape roads",
+        "- You may render road surfaces with realistic materials and markings",
+        "- Roads must remain clearly readable as roads",
+        "- Buildings, trees, water, and landscape masses must not be placed on road pixels",
         "",
-        "RULES (HIGHEST PRIORITY):",
+        "GEOMETRY LOCK (HIGHEST PRIORITY):",
+        "- Colored zones are fixed masks",
+        "- Black pixels are immutable road network",
         "- Preserve all zone boundaries exactly",
         "- Preserve all roads exactly",
+        "- Do NOT change ANY pixel position of roads",
         "- Do NOT modify geometry in any way",
-        "- Only fill inside each colored zone",
+        "- Only fill inside non-road colored zones",
+        "- Areas outside the site boundary must remain unchanged",
         "- No text or labels",
         "- If a zone is open space, render landscape only and do not place buildings",
         "- TOTAL SITE AREA: ~%s sqm" % "{:,.0f}".format(site_area),
@@ -787,8 +791,16 @@ def build_pass1_prompt(table, zone_masks, site_area):
         seen_rgb.add((r, g, b))
 
         # white / black road 계열
-        if (r, g, b) in {(255, 255, 255), (0, 0, 0)}:
-            lines.append("RGB(%d,%d,%d) | Road network | fixed road geometry | keep unchanged" % (r, g, b))
+        if (r, g, b) == (0, 0, 0):
+            lines.append(
+                "RGB(0,0,0) | Road network | fixed geometry | realistic asphalt surface | lane markings | curbs | no buildings"
+            )
+            continue
+
+        if (r, g, b) == (255, 255, 255):
+            lines.append(
+                "RGB(255,255,255) | White road or paved circulation | immutable | keep unchanged"
+            )
             continue
 
         preset_key = row.get("preset", "[직접입력]")
@@ -858,11 +870,12 @@ def build_pass1_prompt(table, zone_masks, site_area):
     lines += [
         "",
         "TASK:",
-        "Fill the white site region with a top-down 2D masterplan layout.",
+        "Fill each non-road colored zone with a top-down 2D masterplan layout.",
+        "Render black road areas as realistic roads while preserving their exact geometry.",
         "",
         "OUTPUT STYLE (LOW PRIORITY):",
         "- Premium Korean urban development masterplan illustration",
-        "- Fill the entire site completely — no empty areas",
+        "- Fill the entire site completely — no empty areas except protected road surfaces",
         "",
         "BUILDINGS:",
         "- Many individual building footprints",
@@ -870,7 +883,10 @@ def build_pass1_prompt(table, zone_masks, site_area):
         "- Realistic spacing and setbacks per zone type",
         "",
         "ROADS:",
-        "- Strong road hierarchy — primary, secondary, local access roads clearly differentiated",
+        "- Preserve the exact uploaded road geometry",
+        "- Render roads as realistic streets with asphalt texture, lane markings, curbs, and sidewalks where appropriate",
+        "- Keep hierarchy clear: primary roads, secondary roads, and local access roads",
+        "- Do not place buildings or heavy landscape masses on roads",
         "",
         "LANDSCAPE:",
         "- Rich and layered — tree canopy clusters, street trees, central greens, pocket parks",
