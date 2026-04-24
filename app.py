@@ -81,8 +81,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────
-# 표준 토지이용 항목
+# 상수
 # ──────────────────────────────────────────────────────────────
+MODEL_NAME = "gemini-3.1-flash-image-preview"
+
 STANDARD_LAND_USES = [
     # 주거
     ("단독주택",          (255, 255, 127), "단독주택",                    "저층 단독주택"),
@@ -134,7 +136,7 @@ STANDARD_LAND_USES = [
 ]
 
 # ──────────────────────────────────────────────────────────────
-# 프리셋 데이터
+# 프리셋
 # ──────────────────────────────────────────────────────────────
 ZONE_PRESETS_SIMPLE = {
     "단독주택": {
@@ -272,6 +274,7 @@ def ensure_session():
         "pass3_outputs": [],
         "pass3_selected_idx": 0,
         "_auto_colors": [],
+        "_errors": [],
     }
     for k, v in defs.items():
         if k not in st.session_state:
@@ -319,6 +322,59 @@ def pil_to_png_bytes(img: Image.Image) -> bytes:
 
 def bytes_to_pil(b: bytes) -> Image.Image:
     return Image.open(BytesIO(b)).convert("RGB")
+
+# ──────────────────────────────────────────────────────────────
+# 마스크 추출 + 클립 (경계 이탈 원천 차단)
+# ──────────────────────────────────────────────────────────────
+def extract_site_mask(plan_bytes: bytes, white_threshold: int = 240) -> "np.ndarray | None":
+    """
+    흰배경 계획도에서 사이트 마스크 추출.
+    반환: 흰색=0(외부), 유색=255(내부) grayscale numpy array
+    """
+    if not (CV2_AVAILABLE and np is not None):
+        return None
+    arr = np.array(bytes_to_pil(plan_bytes))
+    white = (
+        (arr[:, :, 0] >= white_threshold) &
+        (arr[:, :, 1] >= white_threshold) &
+        (arr[:, :, 2] >= white_threshold)
+    )
+    mask = np.where(white, 0, 255).astype(np.uint8)
+    # 작은 노이즈 제거
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    return mask
+
+def apply_clip(
+    generated_bytes: bytes,
+    satellite_bytes: bytes,
+    site_mask: "np.ndarray",
+    feather_radius: int = 3,
+) -> bytes:
+    """
+    생성 결과를 사이트 마스크로 클립.
+    마스크 내부 = 생성 픽셀, 외부 = 위성 픽셀.
+    """
+    if not (CV2_AVAILABLE and np is not None) or site_mask is None:
+        return generated_bytes
+
+    gen = np.array(bytes_to_pil(generated_bytes))
+    h, w = gen.shape[:2]
+
+    sat = np.array(bytes_to_pil(satellite_bytes))
+    sat = cv2.resize(sat, (w, h), interpolation=cv2.INTER_LANCZOS4)
+
+    mask = cv2.resize(site_mask, (w, h), interpolation=cv2.INTER_LINEAR)
+
+    # 엣지 페더링
+    if feather_radius > 0:
+        mask = cv2.GaussianBlur(mask, (feather_radius * 2 + 1, feather_radius * 2 + 1), 0)
+
+    alpha = mask.astype(np.float32) / 255.0
+    alpha3 = np.stack([alpha] * 3, axis=-1)
+
+    result = (gen * alpha3 + sat * (1 - alpha3)).astype(np.uint8)
+    return pil_to_png_bytes(Image.fromarray(result))
 
 # ──────────────────────────────────────────────────────────────
 # 범례 이미지 — UI 확인용
@@ -453,7 +509,6 @@ def describe_position(cx, cy, w, h) -> str:
 # 공원/녹지 여부 판별
 # ──────────────────────────────────────────────────────────────
 def should_keep_color(row: dict) -> bool:
-    """공원/녹지/수공간 → 색상 유지 / 건물 구역 → 흰백판"""
     preset = row.get("preset", "")
     custom = row.get("custom_desc", "").strip().lower()
 
@@ -470,7 +525,7 @@ def should_keep_color(row: dict) -> bool:
     return any(k in custom for k in no_building_keywords)
 
 # ──────────────────────────────────────────────────────────────
-# 핵심: 합성 입력 이미지 생성
+# 합성 입력 이미지 생성
 # 위성(배경) + site 내부 흰색 + 검정 경계선 + [Z] 레이블
 # 공원/녹지 구역은 원본 색상 유지
 # ──────────────────────────────────────────────────────────────
@@ -483,7 +538,7 @@ def build_composite_with_labels(
     landuse_arr = np.array(bytes_to_pil(landuse_bytes))
     h, w = landuse_arr.shape[:2]
 
-    # 1. 배경 준비 (위성 or 흰색)
+    # 배경 준비
     if sat_bytes:
         sat = bytes_to_pil(sat_bytes)
         try:
@@ -494,25 +549,25 @@ def build_composite_with_labels(
     else:
         result = np.ones((h, w, 3), dtype=np.uint8) * 255
 
-    # 2. 검정 경계선 마스크
+    # 검정 경계선 마스크
     gray = cv2.cvtColor(landuse_arr, cv2.COLOR_RGB2GRAY)
     _, black_mask = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY_INV)
 
-    # 3. 흰색 외부 배경 마스크
+    # 흰색 외부 배경 마스크
     white_bg = (
         (landuse_arr[:, :, 0] > 240) &
         (landuse_arr[:, :, 1] > 240) &
         (landuse_arr[:, :, 2] > 240)
     )
 
-    # 4. site 내부 → 흰색
+    # site 내부 → 흰색
     site_interior = ~white_bg & (black_mask == 0)
     result[site_interior] = [255, 255, 255]
 
-    # 5. 검정 경계선 복원
+    # 검정 경계선 복원
     result[black_mask > 0] = [30, 30, 30]
 
-    # 6. 용도 기준 Z번호 그룹화
+    # Z번호 그룹화
     def get_zone_key(row: dict) -> str:
         preset = row.get("preset", "[직접입력]")
         custom = row.get("custom_desc", "").strip()
@@ -532,7 +587,7 @@ def build_composite_with_labels(
             z_counter[0] += 1
         return zone_key_to_z[key]
 
-    # 7. 구역별 처리
+    # 구역별 처리
     for i, row in enumerate(table):
         if not row.get("enabled", True):
             continue
@@ -546,18 +601,16 @@ def build_composite_with_labels(
             continue
 
         if should_keep_color(row):
-            # 공원/녹지 → 원본 색상 복원
             result[mask > 0] = [r, g, b]
             continue
 
-        # 건물 구역 → Z레이블 삽입
         z_num = get_z_num(row)
         label_text = "[Z%d]" % z_num
 
         num_comp, _, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
         for ci in range(1, num_comp):
             comp_area = stats[ci, cv2.CC_STAT_AREA]
-            if comp_area < 100:  # 너무 작은 파편 제외
+            if comp_area < 100:
                 continue
             cx = int(centroids[ci][0])
             cy = int(centroids[ci][1])
@@ -570,11 +623,9 @@ def build_composite_with_labels(
             tx = max(tw // 2, min(w - tw, cx - tw // 2))
             ty = max(th, min(h - 4, cy + th // 2))
 
-            # 흰색 배경 박스
             cv2.rectangle(result,
                 (tx - 2, ty - th - 2), (tx + tw + 2, ty + 2),
                 (255, 255, 255), -1)
-            # 레이블 텍스트
             cv2.putText(result, label_text, (tx, ty),
                 cv2.FONT_HERSHEY_SIMPLEX, font_scale,
                 (20, 20, 20), thickness, cv2.LINE_AA)
@@ -582,7 +633,7 @@ def build_composite_with_labels(
     return pil_to_png_bytes(Image.fromarray(result)), zone_label_map
 
 # ──────────────────────────────────────────────────────────────
-# 흰색 경계선 제거 (생성 후처리)
+# 흰색 경계선 제거 후처리
 # ──────────────────────────────────────────────────────────────
 def remove_white_lines(img_bytes: bytes) -> bytes:
     if not (CV2_AVAILABLE and np is not None):
@@ -609,38 +660,34 @@ def remove_white_lines(img_bytes: bytes) -> bytes:
         return img_bytes
 
 # ──────────────────────────────────────────────────────────────
-# 프롬프트 빌더
+# PASS1 프롬프트
 # ──────────────────────────────────────────────────────────────
-FIXED_QUALITY_OBLIQUE = (
-    "RENDER QUALITY — PHOTOREALISTIC (competition-grade archviz):\n"
-    "Lighting: Late-afternoon golden-hour sun, low angle. Strong directional shadows. "
-    "Warm orange-gold on sunlit faces. Cool blue-grey in shadows. Filmic HDR.\n"
-    "Glass: Fresnel reflections, sky color reflected, sharp sun glints on curtain walls.\n"
-    "Brick/concrete: Visible mortar joints, surface grain, shadow lines under overhangs.\n"
-    "Vegetation: 3D volumetric tree canopies, translucent leaf edges, cast shadows.\n"
-    "Roads: Asphalt texture, curb shadow lines, sidewalk paving patterns.\n"
-    "No blur, no cartoon shading, no flat uniform colors. Photorealistic throughout.\n"
-)
-
 def build_pass1_prompt(
     table: list, zone_masks: dict, site_area: float, zone_label_map: dict = None
 ) -> str:
     lines = [
-        "You are given ONE image: a masterplan canvas with two types of zones.",
+        "You are given TWO images:",
+        "- Image 1: masterplan canvas — white zones with [Z] labels = building zones,",
+        "  colored zones = parks, greenery, water (already correctly colored).",
+        "- Image 2: satellite photo of the same site — use as context reference.",
         "",
-        "ZONE TYPES IN THE IMAGE:",
-        "- WHITE zones with [Z1], [Z2]... labels = building zones.",
-        "  Fill these with detailed architecture matching the zone type listed below.",
-        "- COLORED zones (green, blue, brown, etc.) = parks, greenery, water, open space.",
-        "  These zones are already colored correctly. Enhance with landscape detail only.",
-        "  Do NOT place any buildings in colored zones.",
+        "TASK: Transform Image 1 into a premium top-down 2D urban masterplan illustration.",
+        "The result must read as a single unified aerial image consistent with Image 2.",
         "",
-        "TASK: Transform this into a premium top-down 2D urban masterplan illustration.",
+        "MATERIALS — EVERY SURFACE MUST USE REAL PHYSICAL MATERIALS ONLY:",
+        "Rooftops: green roof vegetation, solar panel arrays, HVAC units,",
+        "  skylights, exposed concrete, or reflective glass.",
+        "Facades: glass curtain wall, brick, exposed concrete, metal cladding,",
+        "  stone panel, ceramic tile, painted plaster.",
+        "Ground: asphalt, concrete pavement, gravel, natural soil,",
+        "  grass, tree canopy, stone paving, pedestrian tiles.",
+        "No surface may display a flat zone color — any flat-colored surface",
+        "is a generation error. Override with permitted materials above.",
         "",
-        "ABSOLUTE RULES:",
-        "- White [Z] zones: fill fully with buildings, roads, landscape per zone type.",
-        "- Colored zones: enhance with trees, texture, paths. NO buildings.",
-        "- Preserve ALL zone boundaries exactly as shown. Do NOT redraw or merge zones.",
+        "ZONE RULES:",
+        "- White [Z] zones: fill fully with buildings, roads, landscape per zone type below.",
+        "- Colored zones: enhance with trees, texture, paths. NO buildings whatsoever.",
+        "- Preserve ALL zone boundaries exactly. Do NOT redraw or merge zones.",
         "- NO text, labels, or zone numbers in the output.",
         "- TOTAL SITE AREA: ~%s sqm." % "{:,.0f}".format(site_area),
         "",
@@ -661,7 +708,6 @@ def build_pass1_prompt(
             area_str = " | ~%s sqm" % "{:,.0f}".format(user_area) if user_area > 0 else ""
             lines.append("  [%s] = %s%s" % (z_key, desc, area_str))
     else:
-        # fallback: RGB 방식
         seen_rgb = set()
         for row in table:
             if not row.get("enabled", True):
@@ -672,59 +718,66 @@ def build_pass1_prompt(
             seen_rgb.add((r, g, b))
             preset_key = row.get("preset", "[직접입력]")
             custom = row.get("custom_desc", "").strip()
-            if custom:
-                desc = custom
-            elif preset_key in ZONE_PRESETS_SIMPLE:
-                desc = ZONE_PRESETS_SIMPLE[preset_key].get("prompt_note", preset_key)
-            else:
-                desc = row.get("name", "")
+            desc = custom if custom else ZONE_PRESETS_SIMPLE.get(preset_key, {}).get("prompt_note", row.get("name", ""))
             lines.append("  RGB(%d,%d,%d) = %s" % (r, g, b, desc))
 
     lines += [
         "",
-        "GEOMETRY LOCK — NON-NEGOTIABLE:",
-        "Preserve ALL zone boundaries exactly as shown in the image.",
-        "Insert content within existing zones only. Never redesign boundaries.",
+        "ARCHITECTURE:",
+        "Varied massing per zone: stepped volumes, courtyard typologies, podium-tower compositions.",
+        "Allow 1–2 landmark buildings within their respective footprints.",
+        "All facades: realistic window systems, material transitions, floor-level articulation.",
         "",
         "OUTPUT STYLE — PREMIUM 2D MASTERPLAN:",
         "Style: high-end Korean urban development competition board.",
-        "",
-        "COLOR PALETTE:",
-        "Residential: warm beige/cream buildings, grey slate rooftops, soft drop shadows.",
-        "Parks/green zones: rich dark green canopy over light green lawn, circular tree shadows.",
-        "Public facilities: terracotta/orange accent roofs, civic plazas.",
-        "Water bodies: vivid blue-green with subtle ripple texture.",
-        "Roads: light warm grey asphalt, white lane markings, curb lines.",
-        "",
-        "BUILDINGS:",
-        "Many varied footprints — L-shape, U-shape, courtyard, slab bar, point tower, podium.",
-        "Each block unique in shape and orientation. Realistic setbacks per zone type.",
-        "Buildings cast soft directional drop shadows. Roof surfaces show material texture.",
-        "",
-        "LANDSCAPE:",
-        "Lush dark green tree canopies with circular shadow halos beneath.",
-        "Light green lawns, scattered shrubs, flower beds in public spaces.",
-        "Dense street trees along all major roads.",
-        "Green and colored zones: fully filled with rich landscape, never flat solid color.",
-        "",
-        "QUALITY:",
-        "Competition-board quality. Rich, dense, colorful, highly detailed.",
+        "Color palette:",
+        "  Residential: warm beige/cream buildings, grey slate rooftops, soft drop shadows.",
+        "  Parks/green: rich dark green canopy over light green lawn, circular tree shadows.",
+        "  Public: terracotta/orange accent roofs, civic plazas.",
+        "  Water: vivid blue-green with subtle ripple texture.",
+        "  Roads: light warm grey asphalt, white lane markings, curb lines.",
+        "Buildings: many varied footprints — L-shape, U-shape, courtyard, slab, point tower.",
+        "Landscape: lush dark green canopies, light green lawns, dense street trees.",
+        "Quality: competition-board quality. Rich, dense, colorful, highly detailed.",
         "Crisp clean edges. No text, no labels, no zone markers in output.",
+        "",
+        "HARD CONSTRAINTS:",
+        "DO NOT generate anything in white areas outside the site boundary.",
+        "DO NOT produce CG, cartoon, or plastic-looking output.",
     ]
     return "\n".join(lines).strip()
 
+# ──────────────────────────────────────────────────────────────
+# PASS2 프롬프트
+# ──────────────────────────────────────────────────────────────
+FIXED_QUALITY_OBLIQUE = (
+    "RENDER QUALITY — PHOTOREALISTIC (competition-grade archviz):\n"
+    "Lighting: Late-afternoon golden-hour sun, low angle. Strong directional shadows. "
+    "Warm orange-gold on sunlit faces. Cool blue-grey in shadows. Filmic HDR.\n"
+    "Glass: Fresnel reflections, sky color reflected, sharp sun glints on curtain walls.\n"
+    "Brick/concrete: Visible mortar joints, surface grain, shadow lines under overhangs.\n"
+    "Vegetation: 3D volumetric tree canopies, translucent leaf edges, cast shadows.\n"
+    "Roads: Asphalt texture, curb shadow lines, sidewalk paving patterns.\n"
+    "No blur, no cartoon shading, no flat uniform colors. Photorealistic throughout.\n"
+)
 
 def build_pass2_prompt(table: list) -> str:
     lines = [
-        "You are given TWO images:",
-        "- Image 1: 2D top-down masterplan layout to convert.",
-        "- Image 2: Original land use plan map (zone color reference).",
+        "Convert the input 2D masterplan into a photorealistic 3D oblique aerial archviz render.",
         "",
-        "TASK: Convert Image 1 into a photorealistic 3D archviz rendering.",
-        "Apply facade materials and building heights per zone using the legend below.",
+        "MATERIALS — EVERY SURFACE MUST USE REAL PHYSICAL MATERIALS ONLY:",
+        "Rooftops: green roof vegetation, solar panel arrays, HVAC units,",
+        "  skylights, exposed concrete, or reflective glass.",
+        "Facades: glass curtain wall, brick, exposed concrete, metal cladding,",
+        "  stone panel, ceramic tile, painted plaster.",
+        "Ground: asphalt, concrete pavement, gravel, natural soil,",
+        "  grass, tree canopy, stone paving, pedestrian tiles.",
+        "No surface may display a flat zone color — any flat-colored surface",
+        "is a generation error. Override with permitted materials above.",
         "",
-        "LAND USE LEGEND:",
+        "LAND USE REFERENCE:",
     ]
+
     seen_rgb = set()
     for row in table:
         if not row.get("enabled", True):
@@ -735,32 +788,28 @@ def build_pass2_prompt(table: list) -> str:
         seen_rgb.add((r, g, b))
         preset_key = row.get("preset", "[직접입력]")
         custom = row.get("custom_desc", "").strip()
-        if custom:
-            desc = custom[:80]
-        elif preset_key in ZONE_PRESETS_SIMPLE:
-            desc = ZONE_PRESETS_SIMPLE[preset_key].get("prompt_note", "")
-        else:
-            desc = row.get("name", "")
+        desc = custom[:80] if custom else ZONE_PRESETS_SIMPLE.get(preset_key, {}).get("prompt_note", row.get("name", ""))
         lines.append("  RGB(%d,%d,%d) = %s" % (r, g, b, desc))
 
     lines += [
         "",
-        "- Keep all geometry exactly as in Image 1. Do NOT redesign.",
-        "- Maintain exact geographic extent. Do NOT crop or zoom.",
-        "CAMERA: 45-55 degree oblique aerial view.",
+        "Keep all geometry exactly as in the input. Do NOT redesign or crop.",
+        "CAMERA: 45–55 degree oblique aerial view, matched to input perspective.",
         "",
         FIXED_QUALITY_OBLIQUE,
-        "Negative: No text, no labels. No white blank areas.",
+        "HARD CONSTRAINTS:",
+        "DO NOT produce CG, cartoon, or plastic-looking output.",
+        "DO NOT render any text or labels.",
     ]
     return "\n".join(lines).strip()
 
-
+# ──────────────────────────────────────────────────────────────
+# PASS3 프롬프트
+# ──────────────────────────────────────────────────────────────
 def build_pass3_prompt(angle: int) -> str:
     return (
-        "Same scene, %d-degree oblique aerial view. "
-        "Preserve exact layout and all building massing. "
-        "Golden-hour sunlight, realistic glass reflections, crisp facade highlights. "
-        "No labels, no text." % angle
+        "Keep everything exactly the same. "
+        "Only change the camera angle to %d degrees oblique aerial view." % angle
     )
 
 # ──────────────────────────────────────────────────────────────
@@ -865,6 +914,12 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# 에러 표시
+if st.session_state._errors:
+    for err in st.session_state._errors:
+        st.error(err)
+    st.session_state._errors = []
+
 # ══════════════════════════════════════════════════════════════
 # STEP 0: 이미지 입력
 # ══════════════════════════════════════════════════════════════
@@ -885,7 +940,7 @@ if cur_step == 0:
 
     with col_sat:
         st.markdown("**위성사진** (선택)")
-        st.caption("동일 위치 위성사진 — 합성 입력 이미지의 배경으로 사용됩니다")
+        st.caption("동일 위치 위성사진 — 배경 합성 및 클립 기준으로 사용됩니다")
         f3 = st.file_uploader("위성사진 업로드", type=["png","jpg","jpeg"], key="up_sat")
         if f3:
             st.session_state.img_sat_bytes = f3.getvalue()
@@ -912,7 +967,7 @@ elif cur_step == 1:
     st.markdown('<div class="section-header">② 토지이용계획표</div>', unsafe_allow_html=True)
     st.caption("각 토지이용 항목의 RGB 색상, 면적, 용도 설명을 설정하세요.")
 
-    # ── 엑셀 업로드 ──────────────────────────────────────────
+    # 엑셀 업로드
     with st.expander("📥 엑셀로 토지이용계획표 불러오기", expanded=False):
         st.caption("컬럼 순서: 용도명 / R / G / B / 면적(㎡) / 용도설명(영문) / 프리셋(선택)")
 
@@ -976,7 +1031,7 @@ elif cur_step == 1:
             except Exception as _e:
                 st.error("엑셀 파일 오류: %s" % str(_e))
 
-    # ── 색상 자동 추출 ──────────────────────────────────────
+    # 색상 자동 추출
     if st.session_state.img_landuse_bytes and CV2_AVAILABLE:
         if st.button("🎨 이미지에서 색상 자동 추출"):
             with st.spinner("색상 분석 중..."):
@@ -1015,7 +1070,7 @@ elif cur_step == 1:
                     st.rerun()
         st.markdown("---")
 
-    # ── 표준 항목 추가 ──────────────────────────────────────
+    # 표준 항목 추가
     with st.expander("+ 항목 추가", expanded=False):
         lu_names = [lu[0] for lu in STANDARD_LAND_USES]
         ac1, ac2 = st.columns([3, 1])
@@ -1048,7 +1103,7 @@ elif cur_step == 1:
                 })
                 st.rerun()
 
-    # ── 테이블 편집 ───────────────────────────────────────
+    # 테이블 편집
     st.markdown('<div class="sub-label">토지이용 항목 목록</div>', unsafe_allow_html=True)
     table = st.session_state.land_use_table
 
@@ -1100,7 +1155,7 @@ elif cur_step == 1:
         st.session_state.land_use_table = [r for idx, r in enumerate(table) if idx not in to_delete]
         st.rerun()
 
-    # ── RGB 추출 미리보기 ────────────────────────────────
+    # RGB 추출 미리보기
     st.markdown('<div class="sub-label">RGB 추출 미리보기</div>', unsafe_allow_html=True)
     if st.session_state.img_landuse_bytes and CV2_AVAILABLE and table:
         if st.button("구역 추출 미리보기", type="secondary"):
@@ -1124,7 +1179,7 @@ elif cur_step == 1:
             else:
                 st.warning("추출된 구역 없음. RGB 값과 tolerance를 조정하세요.")
 
-    # ── 면적 합계 ──────────────────────────────────────
+    # 면적 합계
     total_area = sum(row.get("area_sqm", 0) for row in table if row.get("enabled", True))
     site_area  = st.session_state.site_area_sqm
     diff = site_area - total_area
@@ -1155,16 +1210,15 @@ else:
         st.stop()
 
     api_key = st.text_input("Google AI Studio API 키", type="password").strip()
-    model_name = "gemini-3-pro-image-preview"
-    st.caption("모델: %s" % model_name)
+    st.caption("모델: %s" % MODEL_NAME)
 
     table = st.session_state.land_use_table
 
-    # ── 위성사진 상태 확인 + 재업로드 ──────────────────────
+    # 위성사진 상태
     if st.session_state.img_sat_bytes:
-        st.success("✅ 위성사진 로드됨 — 합성 입력 이미지 배경으로 사용됩니다")
+        st.success("✅ 위성사진 로드됨 — 합성 배경 및 경계 클립에 사용됩니다")
     else:
-        st.warning("⚠️ 위성사진 없음 — 업로드하면 합성 이미지에 위성 배경이 적용됩니다")
+        st.warning("⚠️ 위성사진 없음 — 업로드하면 경계 클립 품질이 크게 향상됩니다")
         with st.expander("위성사진 업로드", expanded=True):
             f_sat_retry = st.file_uploader(
                 "위성사진 (.png/.jpg/.jpeg)",
@@ -1175,9 +1229,11 @@ else:
                 st.session_state.img_sat_bytes = f_sat_retry.getvalue()
                 st.rerun()
 
-    # ── 합성 입력 이미지 생성 ──────────────────────────────
+    # 합성 입력 이미지 생성
     composite_bytes = None
     zone_label_map = {}
+    site_mask = None
+
     if CV2_AVAILABLE:
         with st.spinner("입력 이미지 합성 중..."):
             composite_bytes, zone_label_map = build_composite_with_labels(
@@ -1185,9 +1241,11 @@ else:
                 table,
                 st.session_state.img_sat_bytes
             )
+            # 마스크 추출 (경계 클립용)
+            site_mask = extract_site_mask(st.session_state.img_landuse_bytes)
 
     if composite_bytes:
-        st.markdown('<div class="sub-label">합성 입력 이미지 (PASS1 입력용)</div>',
+        st.markdown('<div class="sub-label">합성 입력 이미지 (PASS1 입력)</div>',
                     unsafe_allow_html=True)
         st.image(bytes_to_pil(composite_bytes),
                  caption="위성배경 + 흰백판 + Z레이블 + 공원녹지 색상",
@@ -1195,14 +1253,14 @@ else:
 
     input_for_pass1 = composite_bytes if composite_bytes else st.session_state.img_landuse_bytes
 
-    # ── 범례 이미지 — UI 확인용 ────────────────────────────
+    # 범례 이미지
     legend_bytes = build_legend_image(table)
     if legend_bytes:
         st.markdown('<div class="sub-label">범례 이미지 (UI 확인용)</div>', unsafe_allow_html=True)
         st.image(bytes_to_pil(legend_bytes), width=400,
                  caption="범례 — 모델 입력에는 사용되지 않습니다")
 
-    # ── 프롬프트 생성 ──────────────────────────────────────
+    # 프롬프트 생성
     zone_masks = {}
     if CV2_AVAILABLE:
         zone_masks = extract_zone_masks(st.session_state.img_landuse_bytes, table)
@@ -1212,7 +1270,7 @@ else:
     )
     pass2_prompt = build_pass2_prompt(table)
 
-    # ── 개발자 확인 ───────────────────────────────────────
+    # 개발자 확인
     dev_pw = st.text_input("개발자 비밀번호", type="password", key="dev_pw")
     if dev_pw == "126791":
         with st.expander("PASS1 프롬프트", expanded=False):
@@ -1228,16 +1286,27 @@ else:
     # ── PASS 1 ────────────────────────────────────────────
     st.markdown("### STEP 1 — 2D 배치도 생성")
 
+    # PASS1 이미지 입력: composite(Image1) + 위성(Image2)
+    def get_pass1_images():
+        imgs = [input_for_pass1]
+        if st.session_state.img_sat_bytes:
+            imgs.append(st.session_state.img_sat_bytes)
+        return imgs
+
     def run_pass1():
         client = genai.Client(api_key=api_key)
         try:
             resp = client.models.generate_content(
-                model=model_name,
-                contents=make_contents(pass1_prompt, [input_for_pass1])
+                model=MODEL_NAME,
+                contents=make_contents(pass1_prompt, get_pass1_images())
             )
             out = get_image_from_resp(resp)
             if out:
+                # 후처리 1: 흰선 제거
                 out = remove_white_lines(out)
+                # 후처리 2: 경계 클립 (구조적 경계 이탈 차단)
+                if site_mask is not None and st.session_state.img_sat_bytes:
+                    out = apply_clip(out, st.session_state.img_sat_bytes, site_mask)
                 st.session_state.pass1_outputs.append(out)
                 st.session_state.pass1_selected_idx = len(st.session_state.pass1_outputs) - 1
                 st.session_state.pass1_output_bytes = out
@@ -1245,9 +1314,9 @@ else:
                 st.session_state.pass3_outputs = []
                 st.session_state.pass2_output_bytes = None
             else:
-                st.warning("이미지가 반환되지 않았습니다.")
+                st.session_state._errors.append("PASS1: 이미지가 반환되지 않았습니다.")
         except Exception as e:
-            st.error("PASS1 오류: %s" % str(e))
+            st.session_state._errors.append("PASS1 오류: %s" % str(e))
 
     p1c1, p1c2, p1c3 = st.columns([1.2, 1.5, 3])
     with p1c1:
@@ -1288,7 +1357,7 @@ else:
         client = genai.Client(api_key=api_key)
         try:
             resp = client.models.generate_content(
-                model=model_name,
+                model=MODEL_NAME,
                 contents=make_contents(pass2_prompt, [
                     st.session_state.pass1_output_bytes,
                     st.session_state.img_landuse_bytes,
@@ -1301,9 +1370,9 @@ else:
                 st.session_state.pass2_output_bytes = out
                 st.session_state.pass3_outputs = []
             else:
-                st.warning("이미지가 반환되지 않았습니다.")
+                st.session_state._errors.append("PASS2: 이미지가 반환되지 않았습니다.")
         except Exception as e:
-            st.error("PASS2 오류: %s" % str(e))
+            st.session_state._errors.append("PASS2 오류: %s" % str(e))
 
     p2c1, p2c2, p2c3 = st.columns([1.2, 1.5, 3])
     with p2c1:
@@ -1347,7 +1416,7 @@ else:
             client = genai.Client(api_key=api_key)
             try:
                 resp = client.models.generate_content(
-                    model=model_name,
+                    model=MODEL_NAME,
                     contents=make_contents(
                         build_pass3_prompt(angle_deg),
                         [st.session_state.pass2_output_bytes]
@@ -1358,9 +1427,9 @@ else:
                     st.session_state.pass3_outputs.append(out)
                     st.session_state.pass3_selected_idx = len(st.session_state.pass3_outputs) - 1
                 else:
-                    st.warning("이미지가 반환되지 않았습니다.")
+                    st.session_state._errors.append("PASS3: 이미지가 반환되지 않았습니다.")
             except Exception as e:
-                st.error("PASS3 오류: %s" % str(e))
+                st.session_state._errors.append("PASS3 오류: %s" % str(e))
 
         p3c1, p3c2, p3c3 = st.columns([1.2, 1.5, 3])
         with p3c1:
