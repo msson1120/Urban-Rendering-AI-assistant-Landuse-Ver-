@@ -429,11 +429,11 @@ def build_legend_image(table: list):
 # ──────────────────────────────────────────────────────────────
 # 색상 자동 추출
 # ──────────────────────────────────────────────────────────────
-def extract_dominant_colors(img_bytes: bytes, n_colors: int = 12) -> list:
+def extract_dominant_colors(img_bytes: bytes, n_colors: int = 20) -> list:
     if not (CV2_AVAILABLE and np is not None):
         return []
     arr = np.array(bytes_to_pil(img_bytes)).reshape(-1, 3)
-    arr = arr[arr.sum(axis=1) > 60]
+    # 흰색 배경만 제외 — 검정 도로도 토지이용 색상으로 포함
     arr = arr[~((arr[:, 0] > 230) & (arr[:, 1] > 230) & (arr[:, 2] > 230))]
     if len(arr) < 100:
         return []
@@ -450,8 +450,8 @@ def extract_dominant_colors(img_bytes: bytes, n_colors: int = 12) -> list:
         g = (key // 256) % 256
         r = (key // 65536) % 256
         ratio = counts[idx] / total
-        if ratio < 0.005:
-            break
+        if ratio < 0.003:
+            continue
         if any(abs(r - er) + abs(g - eg) + abs(b - eb) < 30 for er, eg, eb, _ in results):
             continue
         results.append((r, g, b, float(ratio)))
@@ -494,16 +494,6 @@ def build_table_from_detected_colors(
 
     colors = extract_dominant_colors(img_bytes, n_colors=n_colors)
     color_list = [(int(r), int(g), int(b)) for r, g, b, _ in colors]
-
-    black_pixel_mask = (
-        (arr[:, :, 0] < 60) &
-        (arr[:, :, 1] < 60) &
-        (arr[:, :, 2] < 60) &
-        valid_mask
-    )
-    if int(np.count_nonzero(black_pixel_mask)) > 0:
-        if not any((r < 60 and g < 60 and b < 60) for r, g, b in color_list):
-            color_list.insert(0, (0, 0, 0))
 
     if not color_list:
         return []
@@ -1133,26 +1123,13 @@ elif cur_step == 1:
                     (arr[:, :, 2] > 240)
                 )
 
-                # 흰색만 제외. 검정 도로는 항상 전체면적에 포함.
+                # 흰색만 제외, 최근접 배정으로 각 픽셀을 대표색 1개에만 배정
                 valid_mask = ~white_bg
                 valid_pixels = arr[valid_mask].astype(np.int16)
                 total_px = max(1, valid_pixels.shape[0])
 
-                # 감지 색상 목록에 검정 도로색 강제 포함
-                black_pixel_mask = (
-                    (arr[:, :, 0] < 60) &
-                    (arr[:, :, 1] < 60) &
-                    (arr[:, :, 2] < 60) &
-                    valid_mask
-                )
-                has_black = int(np.count_nonzero(black_pixel_mask)) > 0
-
                 color_list = [(int(r), int(g), int(b)) for r, g, b, _ in colors]
-                if has_black:
-                    if not any((r < 60 and g < 60 and b < 60) for r, g, b in color_list):
-                        color_list.insert(0, (0, 0, 0))
 
-                # 각 픽셀을 가장 가까운 대표 RGB 1개에만 배정 (중복 면적 방지)
                 palette = np.array(color_list, dtype=np.int16)
                 if palette.size > 0:
                     diff = valid_pixels[:, None, :] - palette[None, :, :]
