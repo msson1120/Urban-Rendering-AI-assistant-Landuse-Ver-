@@ -1159,8 +1159,14 @@ elif cur_step == 1:
                 for i, (r, g, b, _) in enumerate(colors, start=1):
 
                     tol = 20
-                    lo = np.array([r-tol, g-tol, b-tol], dtype=np.uint8)
-                    hi = np.array([r+tol, g+tol, b+tol], dtype=np.uint8)
+                    lo = np.array(
+                        [max(0, r - tol), max(0, g - tol), max(0, b - tol)],
+                        dtype=np.uint8
+                    )
+                    hi = np.array(
+                        [min(255, r + tol), min(255, g + tol), min(255, b + tol)],
+                        dtype=np.uint8
+                    )
 
                     mask = cv2.inRange(arr, lo, hi)
                     mask = (mask > 0) & valid_mask
