@@ -429,12 +429,12 @@ def build_legend_image(table: list):
 # ──────────────────────────────────────────────────────────────
 # 색상 자동 추출
 # ──────────────────────────────────────────────────────────────
-def extract_dominant_colors(img_bytes: bytes, n_colors: int = 20) -> list:
+def extract_dominant_colors(img_bytes: bytes, n_colors: int = 40) -> list:
     if not (CV2_AVAILABLE and np is not None):
         return []
     arr = np.array(bytes_to_pil(img_bytes)).reshape(-1, 3)
     # 흰색 배경만 제외 — 검정 도로도 토지이용 색상으로 포함
-    arr = arr[~((arr[:, 0] > 230) & (arr[:, 1] > 230) & (arr[:, 2] > 230))]
+    arr = arr[~((arr[:, 0] > 240) & (arr[:, 1] > 240) & (arr[:, 2] > 240))]
     if len(arr) < 100:
         return []
 
@@ -450,7 +450,7 @@ def extract_dominant_colors(img_bytes: bytes, n_colors: int = 20) -> list:
         g = (key // 256) % 256
         r = (key // 65536) % 256
         ratio = counts[idx] / total
-        if ratio < 0.003:
+        if ratio < 0.0005:
             continue
         if any(abs(r - er) + abs(g - eg) + abs(b - eb) < 30 for er, eg, eb, _ in results):
             continue
@@ -1036,6 +1036,11 @@ elif cur_step == 1:
     st.markdown('<div class="section-header">② 토지이용계획표</div>', unsafe_allow_html=True)
     st.caption("각 토지이용 항목의 RGB 색상, 면적, 용도 설명을 설정하세요.")
 
+    if st.button("색상/면적 다시 계산", type="secondary"):
+        st.session_state["_auto_generated"] = False
+        st.session_state.land_use_table = []
+        st.rerun()
+
     # 엑셀 업로드
     with st.expander("📥 엑셀로 토지이용계획표 불러오기", expanded=False):
         st.caption("컬럼 순서: 용도명 / R / G / B / 면적(㎡) / 용도설명(영문) / 프리셋(선택)")
@@ -1110,7 +1115,7 @@ elif cur_step == 1:
 
                 colors = extract_dominant_colors(
                     st.session_state.img_landuse_bytes,
-                    n_colors=20
+                    n_colors=40
                 )
 
                 new_rows = []
@@ -1139,7 +1144,7 @@ elif cur_step == 1:
 
                     for (r, g, b), cnt in zip(color_list, counts):
                         ratio = float(cnt) / float(total_px)
-                        if ratio < 0.003:
+                        if ratio < 0.0005:
                             continue
                         area_sqm = float(st.session_state.site_area_sqm) * ratio
                         is_black = (r < 60 and g < 60 and b < 60)
