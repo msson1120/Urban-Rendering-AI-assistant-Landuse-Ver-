@@ -458,6 +458,97 @@ def extract_dominant_colors(img_bytes: bytes, n_colors: int = 12) -> list:
             break
     return results
 
+def build_table_from_detected_colors(
+    img_bytes: bytes,
+    site_area_sqm: float,
+    n_colors: int = 20,
+    white_threshold: int = 240,
+    black_threshold: int = 60,
+) -> list:
+    """
+    흰 배경 토지이용계획도에서 RGB 색상별 면적비를 추정하여
+    토지이용 항목 목록을 자동 생성한다.
+    - 흰색 배경 제외
+    - 검정 도로/경계선 제외
+    - 색상별 픽셀 비율 × 전체 대상지면적 = 추정면적
+    """
+    if not (CV2_AVAILABLE and np is not None):
+        return []
+
+    img = bytes_to_pil(img_bytes)
+    arr = np.array(img)
+
+    # 흰색 외부 배경 제외
+    white_bg = (
+        (arr[:, :, 0] >= white_threshold) &
+        (arr[:, :, 1] >= white_threshold) &
+        (arr[:, :, 2] >= white_threshold)
+    )
+
+    # 검정 도로/경계선 제외
+    black_line = (
+        (arr[:, :, 0] <= black_threshold) &
+        (arr[:, :, 1] <= black_threshold) &
+        (arr[:, :, 2] <= black_threshold)
+    )
+
+    valid_mask = (~white_bg) & (~black_line)
+    valid_pixels = arr[valid_mask]
+
+    if len(valid_pixels) < 100:
+        return []
+
+    # 색상 양자화: 안티앨리어싱/경계 노이즈 완화
+    q = 4
+    arr_q = (valid_pixels // q * q).astype(np.int32)
+
+    keys = arr_q[:, 0] * 65536 + arr_q[:, 1] * 256 + arr_q[:, 2]
+    unique, counts = np.unique(keys, return_counts=True)
+
+    total_px = int(np.sum(counts))
+    results = []
+
+    for idx in np.argsort(-counts):
+        key = int(unique[idx])
+        cnt = int(counts[idx])
+
+        b = key % 256
+        g = (key // 256) % 256
+        r = (key // 65536) % 256
+
+        ratio = cnt / total_px
+
+        # 너무 작은 노이즈 색상 제거
+        if ratio < 0.003:
+            continue
+
+        # 유사 색상 중복 제거
+        if any(abs(r - er) + abs(g - eg) + abs(b - eb) < 35 for er, eg, eb, _ in results):
+            continue
+
+        results.append((r, g, b, ratio))
+
+        if len(results) >= n_colors:
+            break
+
+    new_rows = []
+    for i, (r, g, b, ratio) in enumerate(results, start=1):
+        area_sqm = float(site_area_sqm) * float(ratio)
+
+        new_rows.append({
+            "name": f"용도_{i}",
+            "r": int(r),
+            "g": int(g),
+            "b": int(b),
+            "preset": "[직접입력]",
+            "custom_desc": "",
+            "area_sqm": round(area_sqm, 1),
+            "tolerance": 20,
+            "enabled": True,
+        })
+
+    return new_rows
+
 # ──────────────────────────────────────────────────────────────
 # RGB 기반 구역 마스크 추출
 # ──────────────────────────────────────────────────────────────
@@ -1037,6 +1128,22 @@ elif cur_step == 1:
             with st.spinner("색상 분석 중..."):
                 colors = extract_dominant_colors(st.session_state.img_landuse_bytes, n_colors=12)
             st.session_state["_auto_colors"] = colors
+
+        if st.session_state.img_landuse_bytes and CV2_AVAILABLE:
+            if st.button("📐 RGB 색상 기반 항목/면적 자동 생성", type="primary"):
+                with st.spinner("RGB 색상 및 면적비 계산 중..."):
+                    detected_table = build_table_from_detected_colors(
+                        st.session_state.img_landuse_bytes,
+                        st.session_state.site_area_sqm,
+                        n_colors=20,
+                    )
+
+                if detected_table:
+                    st.session_state.land_use_table = detected_table
+                    st.success(f"{len(detected_table)}개 색상 항목을 자동 생성했습니다. 용도명과 프리셋을 직접 지정하세요.")
+                    st.rerun()
+                else:
+                    st.warning("자동 추출된 색상이 없습니다. 이미지가 흰 배경 + 색상 구역 구조인지 확인하세요.")
 
         colors = st.session_state.get("_auto_colors", [])
         if colors:
