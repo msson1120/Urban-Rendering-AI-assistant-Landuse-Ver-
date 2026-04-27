@@ -275,6 +275,7 @@ def ensure_session():
         "pass3_selected_idx": 0,
         "_auto_colors": [],
         "_auto_generated": False,
+        "_black_as_road": False,
         "_errors": [],
     }
     for k, v in defs.items():
@@ -1060,6 +1061,20 @@ elif cur_step == 1:
     st.markdown('<div class="section-header">② 토지이용계획표</div>', unsafe_allow_html=True)
     st.caption("각 토지이용 항목의 RGB 색상, 면적, 용도 설명을 설정하세요.")
 
+    # 검정색 처리 방식 선택
+    black_mode = st.radio(
+        "검정색 처리 방식",
+        ["경계선·구분선으로 제외 (기본)", "계획도로 면적으로 포함"],
+        index=1 if st.session_state._black_as_road else 0,
+        horizontal=True,
+        help="계획도에서 검정(RGB<60)이 경계선이면 '제외', 굵은 계획도로 면적이면 '포함'을 선택하세요.",
+    )
+    new_black_as_road = (black_mode == "계획도로 면적으로 포함")
+    if new_black_as_road != st.session_state._black_as_road:
+        st.session_state._black_as_road = new_black_as_road
+        st.session_state._auto_generated = False
+        st.rerun()
+
     # 엑셀 업로드
     with st.expander("📥 엑셀로 토지이용계획표 불러오기", expanded=False):
         st.caption("컬럼 순서: 용도명 / R / G / B / 면적(㎡) / 용도설명(영문) / 프리셋(선택)")
@@ -1149,11 +1164,14 @@ elif cur_step == 1:
 
                 black_line = (
                     (arr[:, :, 0] < 60) &
-                    (arr[:, :, 1] < 60) &  
+                    (arr[:, :, 1] < 60) &
                     (arr[:, :, 2] < 60)
                 )
 
-                valid_mask = (~white_bg) & (~black_line)
+                if st.session_state._black_as_road:
+                    valid_mask = ~white_bg
+                else:
+                    valid_mask = (~white_bg) & (~black_line)
                 total_px = max(1, np.count_nonzero(valid_mask))
 
                 for i, (r, g, b, _) in enumerate(colors, start=1):
@@ -1189,6 +1207,21 @@ elif cur_step == 1:
                         "tolerance": tol,
                         "enabled": True,
                     })
+
+                # 검정색 = 도로 면적으로 포함하는 경우 최상단에 도로 행 삽입
+                if st.session_state._black_as_road:
+                    black_px = int(np.count_nonzero(black_line & ~white_bg))
+                    if black_px > 0:
+                        black_area = st.session_state.site_area_sqm * black_px / total_px
+                        new_rows.insert(0, {
+                            "name": "도로",
+                            "r": 0, "g": 0, "b": 0,
+                            "preset": "[직접입력]",
+                            "custom_desc": "Road network, asphalt surface, lane markings, curb lines",
+                            "area_sqm": round(black_area, 1),
+                            "tolerance": 30,
+                            "enabled": True,
+                        })
 
                 if new_rows:
                     st.session_state.land_use_table = new_rows
