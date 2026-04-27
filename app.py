@@ -274,6 +274,7 @@ def ensure_session():
         "pass3_outputs": [],
         "pass3_selected_idx": 0,
         "_auto_colors": [],
+        "_auto_generated": False,
         "_errors": [],
     }
     for k, v in defs.items():
@@ -1025,6 +1026,7 @@ if cur_step == 0:
         f2 = st.file_uploader("토지이용계획도 업로드", type=["png","jpg","jpeg"], key="up_landuse")
         if f2:
             st.session_state.img_landuse_bytes = f2.getvalue()
+            st.session_state["_auto_generated"] = False  # 새 이미지 업로드 시 재생성 가능
         if st.session_state.img_landuse_bytes:
             st.image(bytes_to_pil(st.session_state.img_landuse_bytes),
                      use_container_width=True, caption="토지이용계획도")
@@ -1124,8 +1126,12 @@ elif cur_step == 1:
 
     # 색상 자동 추출
     if st.session_state.img_landuse_bytes and CV2_AVAILABLE:
-        if st.button("🎨 감지된 색상만으로 토지이용 항목 재생성", type="primary"):
-            with st.spinner("색상 및 면적비 자동 계산 중..."):
+
+        # 이미 한 번 생성했는지 체크 (중복 방지)
+        if not st.session_state.get("_auto_generated", False):
+
+            with st.spinner("색상 및 면적 자동 계산 중..."):
+
                 colors = extract_dominant_colors(
                     st.session_state.img_landuse_bytes,
                     n_colors=20
@@ -1133,67 +1139,55 @@ elif cur_step == 1:
 
                 new_rows = []
 
-                if colors:
-                    # 흰색 배경과 검정 도로/경계 제외 후 유효 픽셀 기준 총량 계산
-                    arr = np.array(bytes_to_pil(st.session_state.img_landuse_bytes))
+                arr = np.array(bytes_to_pil(st.session_state.img_landuse_bytes))
 
-                    white_bg = (
-                        (arr[:, :, 0] > 240) &
-                        (arr[:, :, 1] > 240) &
-                        (arr[:, :, 2] > 240)
-                    )
+                white_bg = (
+                    (arr[:, :, 0] > 240) &
+                    (arr[:, :, 1] > 240) &
+                    (arr[:, :, 2] > 240)
+                )
 
-                    black_line = (
-                        (arr[:, :, 0] < 60) &
-                        (arr[:, :, 1] < 60) &
-                        (arr[:, :, 2] < 60)
-                    )
+                black_line = (
+                    (arr[:, :, 0] < 60) &
+                    (arr[:, :, 1] < 60) &  
+                    (arr[:, :, 2] < 60)
+                )
 
-                    valid_mask = (~white_bg) & (~black_line)
-                    total_valid_px = max(1, int(np.count_nonzero(valid_mask)))
+                valid_mask = (~white_bg) & (~black_line)
+                total_px = max(1, np.count_nonzero(valid_mask))
 
-                    for i, (r, g, b, ratio_old) in enumerate(colors, start=1):
-                        tol = 20
+                for i, (r, g, b, _) in enumerate(colors, start=1):
 
-                        lo = np.array(
-                            [max(0, r - tol), max(0, g - tol), max(0, b - tol)],
-                            dtype=np.uint8
-                        )
-                        hi = np.array(
-                            [min(255, r + tol), min(255, g + tol), min(255, b + tol)],
-                            dtype=np.uint8
-                        )
+                    tol = 20
+                    lo = np.array([r-tol, g-tol, b-tol], dtype=np.uint8)
+                    hi = np.array([r+tol, g+tol, b+tol], dtype=np.uint8)
 
-                        mask = cv2.inRange(arr, lo, hi)
-                        mask = (mask > 0) & valid_mask
+                    mask = cv2.inRange(arr, lo, hi)
+                    mask = (mask > 0) & valid_mask
 
-                        area_px = int(np.count_nonzero(mask))
-                        ratio = area_px / total_valid_px
-                        area_sqm = float(st.session_state.site_area_sqm) * ratio
+                    area_px = np.count_nonzero(mask)
+                    ratio = area_px / total_px
+                    area_sqm = st.session_state.site_area_sqm * ratio
 
-                        if ratio < 0.003:
-                            continue
+                    if ratio < 0.003:
+                        continue
 
-                        new_rows.append({
-                            "name": "",
-                            "r": int(r),
-                            "g": int(g),
-                            "b": int(b),
-                            "preset": "",
-                            "custom_desc": "",
-                            "area_sqm": round(area_sqm, 1),
-                            "tolerance": tol,
-                            "enabled": True,
-                        })
+                    new_rows.append({
+                        "name": "",
+                        "r": int(r),
+                        "g": int(g),
+                        "b": int(b),
+                        "preset": "",
+                        "custom_desc": "",
+                        "area_sqm": round(area_sqm, 1),
+                        "tolerance": tol,
+                        "enabled": True,
+                    })
 
-            if new_rows:
-                # 핵심: 기존 디폴트 삭제하고 감지 색상만 반영
-                st.session_state.land_use_table = new_rows
-                st.session_state["_auto_colors"] = []
-                st.success(f"{len(new_rows)}개 색상 항목으로 테이블을 재생성했습니다.")
-                st.rerun()
-            else:
-                st.warning("감지된 색상이 없습니다. 흰 배경 + 색상 구역 이미지인지 확인하세요.")
+                if new_rows:
+                    st.session_state.land_use_table = new_rows
+                    st.session_state["_auto_generated"] = True
+                    st.rerun()
 
     st.markdown("---")
 
