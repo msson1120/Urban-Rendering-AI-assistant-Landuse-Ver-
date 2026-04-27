@@ -1046,6 +1046,7 @@ elif cur_step == 1:
                     n_colors=40
                 )
                 new_rows = []
+                seen_rgb = set()
 
                 arr = np.array(bytes_to_pil(st.session_state.img_landuse_bytes))
                 white_bg = (
@@ -1059,6 +1060,12 @@ elif cur_step == 1:
                 for r, g, b, _ in colors:
                     r, g, b = int(r), int(g), int(b)
                     tol = 20
+
+                    rgb_key = (r, g, b)
+                    if rgb_key in seen_rgb:
+                        continue
+                    seen_rgb.add(rgb_key)
+
                     lo = np.array(
                         [max(0, r - tol), max(0, g - tol), max(0, b - tol)],
                         dtype=np.uint8
@@ -1081,7 +1088,7 @@ elif cur_step == 1:
                         "r": r,
                         "g": g,
                         "b": b,
-                        "preset": "[직접입력]" if is_black else "",
+                        "preset": "[직접입력]",
                         "custom_desc": "Road network, asphalt surface, lane markings, curb lines" if is_black else "",
                         "area_sqm": 0.0,
                         "tolerance": tol,
