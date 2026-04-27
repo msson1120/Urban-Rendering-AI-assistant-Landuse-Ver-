@@ -1124,59 +1124,78 @@ elif cur_step == 1:
 
     # 색상 자동 추출
     if st.session_state.img_landuse_bytes and CV2_AVAILABLE:
-        if st.button("🎨 이미지에서 색상 자동 추출"):
-            with st.spinner("색상 분석 중..."):
-                colors = extract_dominant_colors(st.session_state.img_landuse_bytes, n_colors=12)
-            st.session_state["_auto_colors"] = colors
+        if st.button("🎨 감지된 색상만으로 토지이용 항목 재생성", type="primary"):
+            with st.spinner("색상 및 면적비 자동 계산 중..."):
+                colors = extract_dominant_colors(
+                    st.session_state.img_landuse_bytes,
+                    n_colors=20
+                )
 
-        if st.session_state.img_landuse_bytes and CV2_AVAILABLE:
-            if st.button("📐 RGB 색상 기반 항목/면적 자동 생성", type="primary"):
-                with st.spinner("RGB 색상 및 면적비 계산 중..."):
-                    detected_table = build_table_from_detected_colors(
-                        st.session_state.img_landuse_bytes,
-                        st.session_state.site_area_sqm,
-                        n_colors=20,
+                new_rows = []
+
+                if colors:
+                    # 흰색 배경과 검정 도로/경계 제외 후 유효 픽셀 기준 총량 계산
+                    arr = np.array(bytes_to_pil(st.session_state.img_landuse_bytes))
+
+                    white_bg = (
+                        (arr[:, :, 0] > 240) &
+                        (arr[:, :, 1] > 240) &
+                        (arr[:, :, 2] > 240)
                     )
 
-                if detected_table:
-                    st.session_state.land_use_table = detected_table
-                    st.success(f"{len(detected_table)}개 색상 항목을 자동 생성했습니다. 용도명과 프리셋을 직접 지정하세요.")
-                    st.rerun()
-                else:
-                    st.warning("자동 추출된 색상이 없습니다. 이미지가 흰 배경 + 색상 구역 구조인지 확인하세요.")
+                    black_line = (
+                        (arr[:, :, 0] < 60) &
+                        (arr[:, :, 1] < 60) &
+                        (arr[:, :, 2] < 60)
+                    )
 
-        colors = st.session_state.get("_auto_colors", [])
-        if colors:
-            st.caption("⚠️ 자동 추출값은 참고용입니다. 정확한 RGB는 범례표를 보고 직접 수정하세요.")
-            st.markdown("**감지된 주요 색상 — 각 색상을 용도에 매핑하세요**")
-            new_rows = []
-            for i in range(0, len(colors), 4):
-                chunk = colors[i:i+4]
-                ccols = st.columns(4)
-                for j, (r, g, b, ratio) in enumerate(chunk):
-                    hex_c = "#%02x%02x%02x" % (r, g, b)
-                    with ccols[j]:
-                        st.markdown(
-                            '<div style="background:%s;height:40px;border-radius:6px;'
-                            'border:1px solid #ccc;"></div>' % hex_c,
-                            unsafe_allow_html=True
+                    valid_mask = (~white_bg) & (~black_line)
+                    total_valid_px = max(1, int(np.count_nonzero(valid_mask)))
+
+                    for i, (r, g, b, ratio_old) in enumerate(colors, start=1):
+                        tol = 20
+
+                        lo = np.array(
+                            [max(0, r - tol), max(0, g - tol), max(0, b - tol)],
+                            dtype=np.uint8
                         )
-                        st.caption("RGB(%d,%d,%d)  %.1f%%" % (r, g, b, ratio * 100))
-                        preset_sel = st.selectbox("용도", ["(무시)"] + PRESET_KEYS,
-                                                  key="auto_preset_%d" % (i+j))
-                        if preset_sel != "(무시)":
-                            new_rows.append({
-                                "name": preset_sel, "r": r, "g": g, "b": b,
-                                "preset": preset_sel, "custom_desc": "",
-                                "area_sqm": 10000.0, "tolerance": 20, "enabled": True,
-                            })
-            if st.button("감지된 색상만으로 테이블 재생성", type="primary", key="apply_auto"):
-                if new_rows:
-                    st.session_state.land_use_table = new_rows
-                    st.session_state["_auto_colors"] = []
-                    st.success("기존 기본 항목을 삭제하고 감지된 색상만으로 테이블을 재생성했습니다.")
-                    st.rerun()
-        st.markdown("---")
+                        hi = np.array(
+                            [min(255, r + tol), min(255, g + tol), min(255, b + tol)],
+                            dtype=np.uint8
+                        )
+
+                        mask = cv2.inRange(arr, lo, hi)
+                        mask = (mask > 0) & valid_mask
+
+                        area_px = int(np.count_nonzero(mask))
+                        ratio = area_px / total_valid_px
+                        area_sqm = float(st.session_state.site_area_sqm) * ratio
+
+                        if ratio < 0.003:
+                            continue
+
+                        new_rows.append({
+                            "name": f"용도_{i}",
+                            "r": int(r),
+                            "g": int(g),
+                            "b": int(b),
+                            "preset": "[직접입력]",
+                            "custom_desc": "",
+                            "area_sqm": round(area_sqm, 1),
+                            "tolerance": tol,
+                            "enabled": True,
+                        })
+
+            if new_rows:
+                # 핵심: 기존 디폴트 삭제하고 감지 색상만 반영
+                st.session_state.land_use_table = new_rows
+                st.session_state["_auto_colors"] = []
+                st.success(f"{len(new_rows)}개 색상 항목으로 테이블을 재생성했습니다.")
+                st.rerun()
+            else:
+                st.warning("감지된 색상이 없습니다. 흰 배경 + 색상 구역 이미지인지 확인하세요.")
+
+    st.markdown("---")
 
     # 표준 항목 추가
     with st.expander("+ 항목 추가", expanded=False):
