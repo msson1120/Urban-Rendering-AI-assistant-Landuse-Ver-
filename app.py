@@ -1175,11 +1175,11 @@ elif cur_step == 1:
                             continue
 
                         new_rows.append({
-                            "name": f"용도_{i}",
+                            "name": "",
                             "r": int(r),
                             "g": int(g),
                             "b": int(b),
-                            "preset": "[직접입력]",
+                            "preset": "",
                             "custom_desc": "",
                             "area_sqm": round(area_sqm, 1),
                             "tolerance": tol,
@@ -1246,18 +1246,16 @@ elif cur_step == 1:
         hex_color = "#%02x%02x%02x" % (r, g, b)
 
         table[i]["enabled"]   = c_en.checkbox("", value=row.get("enabled", True), key="en_%d" % i)
-        table[i]["name"]      = c_name.text_input("", value=row.get("name", ""), key="name_%d" % i, label_visibility="collapsed")
+        table[i]["name"]      = c_name.text_input("", value=row.get("name", ""), key="name_%d" % i, label_visibility="collapsed", placeholder="용도 입력")
         table[i]["r"]         = c_r.number_input("R", 0, 255, r, key="r_%d" % i, label_visibility="collapsed")
         table[i]["g"]         = c_g.number_input("G", 0, 255, g, key="g_%d" % i, label_visibility="collapsed")
         table[i]["b"]         = c_b.number_input("B", 0, 255, b, key="b_%d" % i, label_visibility="collapsed")
         table[i]["tolerance"] = c_tol.number_input("Tol", 5, 80, int(row.get("tolerance", 25)), key="tol_%d" % i, label_visibility="collapsed")
         table[i]["area_sqm"]  = c_area.number_input("sqm", 0.0, 9999999.0, float(row.get("area_sqm", 10000.0)), step=500.0, key="area_%d" % i, label_visibility="collapsed")
 
-        cur_preset = row.get("preset", "[직접입력]")
-        if cur_preset not in PRESET_OPTIONS:
-            cur_preset = "[직접입력]"
+        cur_preset = row.get("preset", "")
         table[i]["preset"] = c_preset.selectbox(
-            "", PRESET_OPTIONS, index=PRESET_OPTIONS.index(cur_preset),
+            "", PRESET_OPTIONS, index=None if cur_preset == "" else PRESET_OPTIONS.index(cur_preset) if cur_preset in PRESET_OPTIONS else 0,
             key="preset_%d" % i, label_visibility="collapsed"
         )
 
