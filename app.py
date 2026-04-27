@@ -429,11 +429,11 @@ def build_legend_image(table: list):
 # ──────────────────────────────────────────────────────────────
 # 색상 자동 추출
 # ──────────────────────────────────────────────────────────────
-def extract_dominant_colors(img_bytes: bytes, n_colors: int = 40) -> list:
+def extract_dominant_colors(img_bytes: bytes, n_colors: int = 20) -> list:
     if not (CV2_AVAILABLE and np is not None):
         return []
     arr = np.array(bytes_to_pil(img_bytes)).reshape(-1, 3)
-    # 흰색 배경만 제외 — 검정 도로도 토지이용 색상으로 포함
+    # 흰색 배경만 제외, 검정 도로는 포함
     arr = arr[~((arr[:, 0] > 240) & (arr[:, 1] > 240) & (arr[:, 2] > 240))]
     if len(arr) < 100:
         return []
@@ -450,7 +450,7 @@ def extract_dominant_colors(img_bytes: bytes, n_colors: int = 40) -> list:
         g = (key // 256) % 256
         r = (key // 65536) % 256
         ratio = counts[idx] / total
-        if ratio < 0.0005:
+        if ratio < 0.003:
             continue
         if any(abs(r - er) + abs(g - eg) + abs(b - eb) < 30 for er, eg, eb, _ in results):
             continue
@@ -1128,37 +1128,31 @@ elif cur_step == 1:
                     (arr[:, :, 2] > 240)
                 )
 
-                # 흰색만 제외, 최근접 배정으로 각 픽셀을 대표색 1개에만 배정
+                # 흰색만 제외. 검정 도로 포함.
                 valid_mask = ~white_bg
-                valid_pixels = arr[valid_mask].astype(np.int16)
-                total_px = max(1, valid_pixels.shape[0])
-
-                color_list = [(int(r), int(g), int(b)) for r, g, b, _ in colors]
-
-                palette = np.array(color_list, dtype=np.int16)
-                if palette.size > 0:
-                    diff = valid_pixels[:, None, :] - palette[None, :, :]
-                    dist2 = np.sum(diff * diff, axis=2)
-                    nearest_idx = np.argmin(dist2, axis=1)
-                    counts = np.bincount(nearest_idx, minlength=len(palette))
-
-                    for (r, g, b), cnt in zip(color_list, counts):
-                        ratio = float(cnt) / float(total_px)
-                        if ratio < 0.0005:
-                            continue
-                        area_sqm = float(st.session_state.site_area_sqm) * ratio
-                        is_black = (r < 60 and g < 60 and b < 60)
-                        new_rows.append({
-                            "name": "도로" if is_black else "",
-                            "r": int(r),
-                            "g": int(g),
-                            "b": int(b),
-                            "preset": "[직접입력]" if is_black else "",
-                            "custom_desc": "Road network, asphalt surface, lane markings, curb lines" if is_black else "",
-                            "area_sqm": round(area_sqm, 1),
-                            "tolerance": 20,
-                            "enabled": True,
-                        })
+                total_px = max(1, int(np.count_nonzero(valid_mask)))
+                for r, g, b, _ in colors:
+                    r, g, b = int(r), int(g), int(b)
+                    tol = 20
+                    lo = np.array([max(0, r - tol), max(0, g - tol), max(0, b - tol)], dtype=np.uint8)
+                    hi = np.array([min(255, r + tol), min(255, g + tol), min(255, b + tol)], dtype=np.uint8)
+                    mask = cv2.inRange(arr, lo, hi)
+                    mask = (mask > 0) & valid_mask
+                    area_px = int(np.count_nonzero(mask))
+                    ratio = area_px / total_px
+                    if ratio < 0.003:
+                        continue
+                    area_sqm = float(st.session_state.site_area_sqm) * ratio
+                    is_black = (r < 60 and g < 60 and b < 60)
+                    new_rows.append({
+                        "name": "도로" if is_black else "",
+                        "r": r, "g": g, "b": b,
+                        "preset": "[직접입력]" if is_black else "",
+                        "custom_desc": "Road network, asphalt surface, lane markings, curb lines" if is_black else "",
+                        "area_sqm": round(area_sqm, 1),
+                        "tolerance": tol,
+                        "enabled": True,
+                    })
 
                 if new_rows:
                     st.session_state.land_use_table = new_rows
