@@ -310,7 +310,7 @@ def make_default_table():
     ]
 
 if not st.session_state.land_use_table:
-    st.session_state.land_use_table = make_default_table()
+    st.session_state.land_use_table = []
 
 # ──────────────────────────────────────────────────────────────
 # 이미지 유틸
@@ -1170,10 +1170,11 @@ elif cur_step == 1:
                                 "preset": preset_sel, "custom_desc": "",
                                 "area_sqm": 10000.0, "tolerance": 20, "enabled": True,
                             })
-            if st.button("+ 선택 항목을 테이블에 추가", type="primary", key="apply_auto"):
+            if st.button("감지된 색상만으로 테이블 재생성", type="primary", key="apply_auto"):
                 if new_rows:
                     st.session_state.land_use_table = new_rows
                     st.session_state["_auto_colors"] = []
+                    st.success("기존 기본 항목을 삭제하고 감지된 색상만으로 테이블을 재생성했습니다.")
                     st.rerun()
         st.markdown("---")
 
