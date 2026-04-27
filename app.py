@@ -275,7 +275,6 @@ def ensure_session():
         "pass3_selected_idx": 0,
         "_auto_colors": [],
         "_auto_generated": False,
-        "_black_as_road": False,
         "_errors": [],
     }
     for k, v in defs.items():
@@ -465,85 +464,71 @@ def build_table_from_detected_colors(
     site_area_sqm: float,
     n_colors: int = 20,
     white_threshold: int = 240,
-    black_threshold: int = 60,
 ) -> list:
     """
     흰 배경 토지이용계획도에서 RGB 색상별 면적비를 추정하여
     토지이용 항목 목록을 자동 생성한다.
-    - 흰색 배경 제외
-    - 검정 도로/경계선 제외
-    - 색상별 픽셀 비율 × 전체 대상지면적 = 추정면적
+
+    기준:
+    - 흰색 배경만 제외
+    - 검정 도로는 항상 전체면적에 포함
+    - 각 픽셀은 가장 가까운 대표 RGB 1개에만 배정
+    - 면적 = 사용자 입력 총면적 × 픽셀비율
     """
     if not (CV2_AVAILABLE and np is not None):
         return []
 
-    img = bytes_to_pil(img_bytes)
-    arr = np.array(img)
+    arr = np.array(bytes_to_pil(img_bytes))
 
-    # 흰색 외부 배경 제외
     white_bg = (
         (arr[:, :, 0] >= white_threshold) &
         (arr[:, :, 1] >= white_threshold) &
         (arr[:, :, 2] >= white_threshold)
     )
 
-    # 검정 도로/경계선 제외
-    black_line = (
-        (arr[:, :, 0] <= black_threshold) &
-        (arr[:, :, 1] <= black_threshold) &
-        (arr[:, :, 2] <= black_threshold)
-    )
+    valid_mask = ~white_bg
+    valid_pixels = arr[valid_mask].astype(np.int16)
 
-    valid_mask = (~white_bg) & (~black_line)
-    valid_pixels = arr[valid_mask]
-
-    if len(valid_pixels) < 100:
+    if valid_pixels.shape[0] < 100:
         return []
 
-    # 색상 양자화: 안티앨리어싱/경계 노이즈 완화
-    q = 4
-    arr_q = (valid_pixels // q * q).astype(np.int32)
+    colors = extract_dominant_colors(img_bytes, n_colors=n_colors)
+    color_list = [(int(r), int(g), int(b)) for r, g, b, _ in colors]
 
-    keys = arr_q[:, 0] * 65536 + arr_q[:, 1] * 256 + arr_q[:, 2]
-    unique, counts = np.unique(keys, return_counts=True)
+    black_pixel_mask = (
+        (arr[:, :, 0] < 60) &
+        (arr[:, :, 1] < 60) &
+        (arr[:, :, 2] < 60) &
+        valid_mask
+    )
+    if int(np.count_nonzero(black_pixel_mask)) > 0:
+        if not any((r < 60 and g < 60 and b < 60) for r, g, b in color_list):
+            color_list.insert(0, (0, 0, 0))
 
-    total_px = int(np.sum(counts))
-    results = []
+    if not color_list:
+        return []
 
-    for idx in np.argsort(-counts):
-        key = int(unique[idx])
-        cnt = int(counts[idx])
-
-        b = key % 256
-        g = (key // 256) % 256
-        r = (key // 65536) % 256
-
-        ratio = cnt / total_px
-
-        # 너무 작은 노이즈 색상 제거
-        if ratio < 0.003:
-            continue
-
-        # 유사 색상 중복 제거
-        if any(abs(r - er) + abs(g - eg) + abs(b - eb) < 35 for er, eg, eb, _ in results):
-            continue
-
-        results.append((r, g, b, ratio))
-
-        if len(results) >= n_colors:
-            break
+    palette = np.array(color_list, dtype=np.int16)
+    diff = valid_pixels[:, None, :] - palette[None, :, :]
+    dist2 = np.sum(diff * diff, axis=2)
+    nearest_idx = np.argmin(dist2, axis=1)
+    counts = np.bincount(nearest_idx, minlength=len(palette))
+    total_px = max(1, valid_pixels.shape[0])
 
     new_rows = []
-    for i, (r, g, b, ratio) in enumerate(results, start=1):
-        area_sqm = float(site_area_sqm) * float(ratio)
-
+    for (r, g, b), cnt in zip(color_list, counts):
+        ratio = float(cnt) / float(total_px)
+        if ratio < 0.003:
+            continue
+        area_sqm = float(site_area_sqm) * ratio
+        is_black = (r < 60 and g < 60 and b < 60)
         new_rows.append({
-            "name": f"용도_{i}",
+            "name": "도로" if is_black else "",
             "r": int(r),
             "g": int(g),
             "b": int(b),
-            "preset": "[직접입력]",
-            "custom_desc": "",
+            "preset": "[직접입력]" if is_black else "",
+            "custom_desc": "Road network, asphalt surface, lane markings, curb lines" if is_black else "",
             "area_sqm": round(area_sqm, 1),
             "tolerance": 20,
             "enabled": True,
@@ -1061,20 +1046,6 @@ elif cur_step == 1:
     st.markdown('<div class="section-header">② 토지이용계획표</div>', unsafe_allow_html=True)
     st.caption("각 토지이용 항목의 RGB 색상, 면적, 용도 설명을 설정하세요.")
 
-    # 검정색 처리 방식 선택
-    black_mode = st.radio(
-        "검정색 처리 방식",
-        ["경계선·구분선으로 제외 (기본)", "계획도로 면적으로 포함"],
-        index=1 if st.session_state._black_as_road else 0,
-        horizontal=True,
-        help="계획도에서 검정(RGB<60)이 경계선이면 '제외', 굵은 계획도로 면적이면 '포함'을 선택하세요.",
-    )
-    new_black_as_road = (black_mode == "계획도로 면적으로 포함")
-    if new_black_as_road != st.session_state._black_as_road:
-        st.session_state._black_as_road = new_black_as_road
-        st.session_state._auto_generated = False
-        st.rerun()
-
     # 엑셀 업로드
     with st.expander("📥 엑셀로 토지이용계획표 불러오기", expanded=False):
         st.caption("컬럼 순서: 용도명 / R / G / B / 면적(㎡) / 용도설명(영문) / 프리셋(선택)")
@@ -1162,64 +1133,48 @@ elif cur_step == 1:
                     (arr[:, :, 2] > 240)
                 )
 
-                black_line = (
+                # 흰색만 제외. 검정 도로는 항상 전체면적에 포함.
+                valid_mask = ~white_bg
+                valid_pixels = arr[valid_mask].astype(np.int16)
+                total_px = max(1, valid_pixels.shape[0])
+
+                # 감지 색상 목록에 검정 도로색 강제 포함
+                black_pixel_mask = (
                     (arr[:, :, 0] < 60) &
                     (arr[:, :, 1] < 60) &
-                    (arr[:, :, 2] < 60)
+                    (arr[:, :, 2] < 60) &
+                    valid_mask
                 )
+                has_black = int(np.count_nonzero(black_pixel_mask)) > 0
 
-                if st.session_state._black_as_road:
-                    valid_mask = ~white_bg
-                else:
-                    valid_mask = (~white_bg) & (~black_line)
-                total_px = max(1, np.count_nonzero(valid_mask))
+                color_list = [(int(r), int(g), int(b)) for r, g, b, _ in colors]
+                if has_black:
+                    if not any((r < 60 and g < 60 and b < 60) for r, g, b in color_list):
+                        color_list.insert(0, (0, 0, 0))
 
-                for i, (r, g, b, _) in enumerate(colors, start=1):
+                # 각 픽셀을 가장 가까운 대표 RGB 1개에만 배정 (중복 면적 방지)
+                palette = np.array(color_list, dtype=np.int16)
+                if palette.size > 0:
+                    diff = valid_pixels[:, None, :] - palette[None, :, :]
+                    dist2 = np.sum(diff * diff, axis=2)
+                    nearest_idx = np.argmin(dist2, axis=1)
+                    counts = np.bincount(nearest_idx, minlength=len(palette))
 
-                    tol = 20
-                    lo = np.array(
-                        [max(0, r - tol), max(0, g - tol), max(0, b - tol)],
-                        dtype=np.uint8
-                    )
-                    hi = np.array(
-                        [min(255, r + tol), min(255, g + tol), min(255, b + tol)],
-                        dtype=np.uint8
-                    )
-
-                    mask = cv2.inRange(arr, lo, hi)
-                    mask = (mask > 0) & valid_mask
-
-                    area_px = np.count_nonzero(mask)
-                    ratio = area_px / total_px
-                    area_sqm = st.session_state.site_area_sqm * ratio
-
-                    if ratio < 0.003:
-                        continue
-
-                    new_rows.append({
-                        "name": "",
-                        "r": int(r),
-                        "g": int(g),
-                        "b": int(b),
-                        "preset": "",
-                        "custom_desc": "",
-                        "area_sqm": round(area_sqm, 1),
-                        "tolerance": tol,
-                        "enabled": True,
-                    })
-
-                # 검정색 = 도로 면적으로 포함하는 경우 최상단에 도로 행 삽입
-                if st.session_state._black_as_road:
-                    black_px = int(np.count_nonzero(black_line & ~white_bg))
-                    if black_px > 0:
-                        black_area = st.session_state.site_area_sqm * black_px / total_px
-                        new_rows.insert(0, {
-                            "name": "도로",
-                            "r": 0, "g": 0, "b": 0,
-                            "preset": "[직접입력]",
-                            "custom_desc": "Road network, asphalt surface, lane markings, curb lines",
-                            "area_sqm": round(black_area, 1),
-                            "tolerance": 30,
+                    for (r, g, b), cnt in zip(color_list, counts):
+                        ratio = float(cnt) / float(total_px)
+                        if ratio < 0.003:
+                            continue
+                        area_sqm = float(st.session_state.site_area_sqm) * ratio
+                        is_black = (r < 60 and g < 60 and b < 60)
+                        new_rows.append({
+                            "name": "도로" if is_black else "",
+                            "r": int(r),
+                            "g": int(g),
+                            "b": int(b),
+                            "preset": "[직접입력]" if is_black else "",
+                            "custom_desc": "Road network, asphalt surface, lane markings, curb lines" if is_black else "",
+                            "area_sqm": round(area_sqm, 1),
+                            "tolerance": 20,
                             "enabled": True,
                         })
 
