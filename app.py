@@ -288,6 +288,11 @@ def ensure_session():
         "dxf_bytes": None,
         "dxf_layer_table": [],
         "use_dxf_mapping": True,
+        "dxf_preview_bytes": None,
+        "dxf_satellite_base_bytes": None,
+        "dxf_landuse_hatch_bytes": None,
+        "dxf_bbox": None,
+        "dxf_crs": "EPSG:5174",
     }
     for k, v in defs.items():
         if k not in st.session_state:
@@ -447,6 +452,183 @@ def extract_dxf_layer_colors(dxf_bytes: bytes) -> list:
             os.remove(tmp_path)
         except Exception:
             pass
+
+# ──────────────────────────────────────────────────────────────
+# DXF → PNG 렌더링
+# ──────────────────────────────────────────────────────────────
+def is_landuse_layer(layer_name: str) -> bool:
+    name = layer_name.lower()
+    exclude = ["구역계", "계획선", "획지선", "boundary", "line"]
+    if any(k in name for k in exclude):
+        return False
+    return (
+        "h_" in name or "h." in name or
+        "공원" in name or "녹지" in name or "도로" in name or
+        "상업" in name or "산업" in name or "복합" in name or
+        "주차" in name or "하천" in name or "주거" in name
+    )
+
+
+def is_boundary_layer(layer_name: str) -> bool:
+    name = layer_name.lower()
+    return "구역계" in name or "boundary" in name
+
+
+def dxf_rgb_for_entity(doc, e):
+    try:
+        if e.dxf.hasattr("true_color") and e.dxf.true_color is not None:
+            return true_color_to_rgb(e.dxf.true_color)
+        if e.dxf.hasattr("color") and int(e.dxf.color) not in [0, 256]:
+            return aci_to_rgb(int(e.dxf.color))
+        layer = doc.layers.get(e.dxf.layer)
+        if layer.dxf.hasattr("true_color") and layer.dxf.true_color is not None:
+            return true_color_to_rgb(layer.dxf.true_color)
+        return aci_to_rgb(int(layer.dxf.color))
+    except Exception:
+        return (180, 180, 180)
+
+
+def get_dxf_extents(dxf_bytes: bytes):
+    if not EZDXF_AVAILABLE:
+        return None
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp:
+        tmp.write(dxf_bytes)
+        tmp_path = tmp.name
+    try:
+        doc = ezdxf.readfile(tmp_path)
+        msp = doc.modelspace()
+        xs, ys = [], []
+        for e in msp:
+            try:
+                if e.dxftype() == "LWPOLYLINE":
+                    for p in e.get_points():
+                        xs.append(float(p[0])); ys.append(float(p[1]))
+                elif e.dxftype() == "POLYLINE":
+                    for v in e.vertices:
+                        xs.append(float(v.dxf.location.x)); ys.append(float(v.dxf.location.y))
+                elif e.dxftype() == "LINE":
+                    xs += [float(e.dxf.start.x), float(e.dxf.end.x)]
+                    ys += [float(e.dxf.start.y), float(e.dxf.end.y)]
+                elif e.dxftype() == "HATCH":
+                    for path in e.paths:
+                        if hasattr(path, "vertices"):
+                            for v in path.vertices:
+                                xs.append(float(v[0])); ys.append(float(v[1]))
+            except Exception:
+                continue
+        if not xs or not ys:
+            return None
+        return min(xs), min(ys), max(xs), max(ys)
+    finally:
+        try: os.remove(tmp_path)
+        except Exception: pass
+
+
+def render_dxf_to_png(
+    dxf_bytes: bytes,
+    mode: str = "preview",
+    width: int = 1600,
+    height: int = 1200,
+    padding_ratio: float = 0.05,
+    show_boundary: bool = True,
+    show_landuse: bool = True,
+    show_plan_lines: bool = True,
+    satellite_bytes: bytes = None,
+) -> bytes | None:
+    """
+    mode:
+    - preview         : 위성/백판 + 구역계 + 해치 + 선
+    - satellite_base  : 위성/백판 + 구역계만
+    - landuse_hatch   : 흰 배경 + 구역계 + 토지이용해치
+    """
+    if not EZDXF_AVAILABLE:
+        return None
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp:
+        tmp.write(dxf_bytes)
+        tmp_path = tmp.name
+    try:
+        doc = ezdxf.readfile(tmp_path)
+        msp = doc.modelspace()
+        bbox = get_dxf_extents(dxf_bytes)
+        if bbox is None:
+            return None
+        minx, miny, maxx, maxy = bbox
+        dx = maxx - minx; dy = maxy - miny
+        pad = max(dx, dy) * padding_ratio
+        minx -= pad; miny -= pad; maxx += pad; maxy += pad
+
+        img = Image.new("RGB", (width, height), (255, 255, 255))
+        if mode in ["preview", "satellite_base"] and satellite_bytes:
+            sat = bytes_to_pil(satellite_bytes)
+            try:
+                sat = sat.resize((width, height), Image.Resampling.LANCZOS)
+            except AttributeError:
+                sat = sat.resize((width, height), Image.LANCZOS)
+            img = sat.copy()
+
+        draw = ImageDraw.Draw(img, "RGBA")
+
+        def xy_to_px(x, y):
+            px = int((x - minx) / (maxx - minx) * width)
+            py = int((maxy - y) / (maxy - miny) * height)
+            return px, py
+
+        def draw_poly(points, stroke, width_px=2, fill=None):
+            if len(points) < 2:
+                return
+            pts = [xy_to_px(x, y) for x, y in points]
+            if fill and len(pts) >= 3:
+                draw.polygon(pts, fill=fill, outline=stroke)
+            else:
+                draw.line(pts, fill=stroke, width=width_px, joint="curve")
+
+        for e in msp:
+            try:
+                layer = e.dxf.layer
+                r, g, b = dxf_rgb_for_entity(doc, e)
+                bdry = is_boundary_layer(layer)
+                lu   = is_landuse_layer(layer)
+
+                if mode == "satellite_base" and not bdry:
+                    continue
+                if mode == "landuse_hatch" and not (bdry or lu):
+                    continue
+                if mode == "preview":
+                    if bdry and not show_boundary: continue
+                    if lu and not show_landuse: continue
+                    if (not bdry and not lu) and not show_plan_lines: continue
+
+                stroke = (255, 0, 0, 255) if bdry else (r, g, b, 255)
+                width_px = 3 if bdry else 1
+
+                if e.dxftype() == "LWPOLYLINE":
+                    pts = [(float(p[0]), float(p[1])) for p in e.get_points()]
+                    fill = (r, g, b, 180) if (lu and e.closed) else None
+                    draw_poly(pts, stroke, width_px, fill)
+
+                elif e.dxftype() == "POLYLINE":
+                    pts = [(float(v.dxf.location.x), float(v.dxf.location.y)) for v in e.vertices]
+                    draw_poly(pts, stroke, width_px)
+
+                elif e.dxftype() == "LINE":
+                    pts = [(float(e.dxf.start.x), float(e.dxf.start.y)),
+                           (float(e.dxf.end.x), float(e.dxf.end.y))]
+                    draw_poly(pts, stroke, width_px)
+
+                elif e.dxftype() == "HATCH":
+                    for path in e.paths:
+                        if hasattr(path, "vertices"):
+                            pts = [(float(v[0]), float(v[1])) for v in path.vertices]
+                            if len(pts) >= 3:
+                                fill = (r, g, b, 190) if lu else None
+                                draw_poly(pts, stroke, 1, fill)
+            except Exception:
+                continue
+
+        return pil_to_png_bytes(img)
+    finally:
+        try: os.remove(tmp_path)
+        except Exception: pass
 
 # ──────────────────────────────────────────────────────────────
 # 마스크 추출 + 클립 (경계 이탈 원천 차단)
@@ -858,13 +1040,17 @@ def build_pass1_prompt(
     table: list, zone_masks: dict, site_area: float, zone_label_map: dict = None
 ) -> str:
     lines = [
-        "You are given TWO images:",
-        "- Image 1: masterplan canvas — white zones with [Z] labels = building zones,",
-        "  colored zones = parks, greenery, water (already correctly colored).",
-        "- Image 2: satellite photo of the same site — use as context reference.",
+        "You are given TWO images exported from a DXF urban planning drawing:",
+        "- Image 1: satellite_base.png — satellite/base canvas with the exact site boundary.",
+        "- Image 2: landuse_hatch.png — land-use hatch map exported from the same DXF,",
+        "  perfectly aligned with Image 1.",
         "",
-        "TASK: Transform Image 1 into a premium top-down 2D urban masterplan illustration.",
-        "The result must read as a single unified aerial image consistent with Image 2.",
+        "The DXF metadata listed below is the AUTHORITATIVE SOURCE for layer names, RGB colors,",
+        "areas, and land-use programs. Use the images only for geometry and visual alignment.",
+        "Do NOT infer land-use type from image color alone — always follow DXF metadata.",
+        "",
+        "TASK: Convert the land-use hatch plan into a premium top-down 2D urban masterplan illustration.",
+        "The result must read as a single unified aerial image consistent with Image 1.",
         "",
         "MATERIALS — EVERY SURFACE MUST USE REAL PHYSICAL MATERIALS ONLY:",
         "Rooftops: green roof vegetation, solar panel arrays, HVAC units,",
@@ -1080,7 +1266,7 @@ def render_selector(outputs, sel_key, label):
 # ──────────────────────────────────────────────────────────────
 # 상단 네비게이션
 # ──────────────────────────────────────────────────────────────
-STEPS = ["① 이미지 입력", "② 토지이용계획표", "③ 생성"]
+STEPS = ["① DXF 입력·지도 확인", "② 레이어·프롬프트 확인", "③ 조감도 생성"]
 cur_step = st.session_state.step
 
 cols_nav = st.columns(len(STEPS))
@@ -1106,7 +1292,7 @@ with nav_c1:
         st.rerun()
 with nav_c2:
     _can_next = (
-        (cur_step == 0 and st.session_state.img_landuse_bytes is not None) or
+        (cur_step == 0 and st.session_state.dxf_landuse_hatch_bytes is not None) or
         (cur_step == 1)
     )
     if st.button("다음 ▶", disabled=(cur_step >= 2 or not _can_next)):
@@ -1129,30 +1315,40 @@ if st.session_state._errors:
 # STEP 0: 이미지 입력
 # ══════════════════════════════════════════════════════════════
 if cur_step == 0:
-    st.markdown('<div class="section-header">① 이미지 입력</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">① DXF 입력·지도 확인</div>', unsafe_allow_html=True)
+    st.caption("DXF 1개를 업로드하면 구역계·토지이용해치·계획선을 확인하고 조감도 입력용 PNG 2장을 추출합니다.")
 
-    col_landuse, col_sat = st.columns(2, gap="large")
+    if not EZDXF_AVAILABLE:
+        st.error("ezdxf 패키지가 필요합니다: pip install ezdxf")
+        st.stop()
 
-    with col_landuse:
-        st.markdown("**토지이용계획도** ⭐ 필수")
-        st.caption("색상으로 구역이 구분된 토지이용계획 이미지")
-        f2 = st.file_uploader("토지이용계획도 업로드", type=["png","jpg","jpeg"], key="up_landuse")
-        if f2:
-            st.session_state.img_landuse_bytes = f2.getvalue()
-            st.session_state["_auto_generated"] = False  # 새 이미지 업로드 시 재생성 가능
-        if st.session_state.img_landuse_bytes:
-            st.image(bytes_to_pil(st.session_state.img_landuse_bytes),
-                     use_container_width=True, caption="토지이용계획도")
-
-    with col_sat:
-        st.markdown("**위성사진** (선택)")
-        st.caption("동일 위치 위성사진 — 배경 합성 및 클립 기준으로 사용됩니다")
-        f3 = st.file_uploader("위성사진 업로드", type=["png","jpg","jpeg"], key="up_sat")
-        if f3:
-            st.session_state.img_sat_bytes = f3.getvalue()
-        if st.session_state.img_sat_bytes:
-            st.image(bytes_to_pil(st.session_state.img_sat_bytes),
-                     use_container_width=True, caption="위성사진")
+    dxf_file = st.file_uploader(
+        "DXF 업로드 — 구역계/토지이용해치/계획선/획지선 포함",
+        type=["dxf"],
+        key="up_dxf_main"
+    )
+    if dxf_file:
+        raw = dxf_file.getvalue()
+        if raw != st.session_state.dxf_bytes:
+            st.session_state.dxf_bytes = raw
+            st.session_state["_auto_generated"] = False
+            rows = extract_dxf_layer_colors(raw)
+            st.session_state.dxf_layer_table = rows
+            st.session_state.dxf_satellite_base_bytes = None
+            st.session_state.dxf_landuse_hatch_bytes = None
+            if rows:
+                st.session_state.land_use_table = [
+                    {
+                        "layer": r["layer"], "name": r["name"],
+                        "r": r["r"], "g": r["g"], "b": r["b"],
+                        "preset": r["preset"], "custom_desc": r["custom_desc"],
+                        "area_sqm": r.get("area_sqm", 0.0),
+                        "tolerance": r.get("tolerance", 20),
+                        "enabled": r.get("enabled", True),
+                    }
+                    for r in rows
+                ]
+                st.session_state["_auto_generated"] = True
 
     st.markdown('<div class="sub-label">계획부지 전체 면적</div>', unsafe_allow_html=True)
     st.session_state.site_area_sqm = st.number_input(
@@ -1161,48 +1357,103 @@ if cur_step == 0:
         step=1000.0, format="%.0f"
     )
 
-    st.markdown('<div class="sub-label">DXF 입력도면</div>', unsafe_allow_html=True)
-    dxf_file = st.file_uploader(
-        "DXF 업로드 — 구역계/토지이용해치/계획선/획지선 포함",
-        type=["dxf"],
-        key="up_dxf"
+    st.markdown('<div class="sub-label">위성백판 (선택)</div>', unsafe_allow_html=True)
+    sat_file = st.file_uploader(
+        "위성사진 업로드 — 없으면 흰 백판으로 생성",
+        type=["png", "jpg", "jpeg"],
+        key="up_sat_for_dxf"
     )
-    if dxf_file:
-        st.session_state.dxf_bytes = dxf_file.getvalue()
-        if EZDXF_AVAILABLE:
-            rows = extract_dxf_layer_colors(st.session_state.dxf_bytes)
-            st.session_state.dxf_layer_table = rows
-            if rows:
-                st.success("DXF 레이어 %d개 추출 완료" % len(rows))
-                st.dataframe(
-                    [
-                        {
-                            "레이어": r["layer"],
-                            "RGB": "%d,%d,%d" % (r["r"], r["g"], r["b"]),
-                            "HEX": r["hex"],
-                            "추정 프리셋": r["preset"],
-                            "객체수": r["entity_count"],
-                        }
-                        for r in rows
-                    ],
-                    use_container_width=True,
-                )
-            else:
-                st.warning("DXF에서 해치/폴리라인 레이어 색상을 추출하지 못했습니다.")
-        else:
-            st.error("ezdxf 패키지가 필요합니다. pip install ezdxf")
+    if sat_file:
+        st.session_state.img_sat_bytes = sat_file.getvalue()
 
-    if not st.session_state.img_landuse_bytes:
-        st.warning("토지이용계획도는 필수입니다. 업로드 후 다음 단계로 이동하세요.")
-    else:
+    if st.session_state.dxf_bytes:
+        st.markdown('<div class="sub-label">지도 표시 옵션</div>', unsafe_allow_html=True)
+        oc1, oc2, oc3, oc4 = st.columns(4)
+        show_sat_bg     = oc1.checkbox("위성/백판",     value=True,  key="opt_sat")
+        show_boundary   = oc2.checkbox("구역계",        value=True,  key="opt_bdry")
+        show_landuse    = oc3.checkbox("토지이용해치",  value=True,  key="opt_lu")
+        show_plan_lines = oc4.checkbox("계획선/획지선", value=True,  key="opt_pl")
+
+        preview_bytes = render_dxf_to_png(
+            st.session_state.dxf_bytes,
+            mode="preview",
+            show_boundary=show_boundary,
+            show_landuse=show_landuse,
+            show_plan_lines=show_plan_lines,
+            satellite_bytes=st.session_state.img_sat_bytes if show_sat_bg else None,
+        )
+        if preview_bytes:
+            st.session_state.dxf_preview_bytes = preview_bytes
+            st.image(bytes_to_pil(preview_bytes),
+                     caption="DXF + 위성백판 미리보기", use_container_width=True)
+
+        if st.session_state.dxf_layer_table:
+            st.markdown('<div class="sub-label">추출된 레이어</div>', unsafe_allow_html=True)
+            st.dataframe(
+                [
+                    {
+                        "레이어": r["layer"],
+                        "RGB": "%d,%d,%d" % (r["r"], r["g"], r["b"]),
+                        "HEX": r["hex"],
+                        "추정 프리셋": r["preset"],
+                        "객체수": r["entity_count"],
+                    }
+                    for r in st.session_state.dxf_layer_table
+                ],
+                use_container_width=True,
+            )
+
+        st.markdown("---")
+        st.markdown("### 조감도 입력용 PNG 2장 추출")
+        st.caption("satellite_base: 위성/백판+구역계   ·   landuse_hatch: 흰백판+해치")
+
+        if st.button("PNG 2장 생성", type="primary"):
+            with st.spinner("렌더링 중..."):
+                sat_base = render_dxf_to_png(
+                    st.session_state.dxf_bytes,
+                    mode="satellite_base",
+                    satellite_bytes=st.session_state.img_sat_bytes,
+                )
+                landuse_hatch = render_dxf_to_png(
+                    st.session_state.dxf_bytes,
+                    mode="landuse_hatch",
+                    satellite_bytes=None,
+                )
+            st.session_state.dxf_satellite_base_bytes = sat_base
+            st.session_state.dxf_landuse_hatch_bytes = landuse_hatch
+            st.session_state.img_sat_bytes = sat_base
+            st.session_state.img_landuse_bytes = landuse_hatch
+            st.success("PNG 2장 생성 완료")
+            st.rerun()
+
+    if st.session_state.dxf_satellite_base_bytes and st.session_state.dxf_landuse_hatch_bytes:
+        pa, pb = st.columns(2)
+        with pa:
+            st.image(bytes_to_pil(st.session_state.dxf_satellite_base_bytes),
+                     caption="Image 1: satellite_base.png", use_container_width=True)
+            st.download_button(
+                "⬇️ satellite_base.png",
+                data=st.session_state.dxf_satellite_base_bytes,
+                file_name="satellite_base.png", mime="image/png",
+            )
+        with pb:
+            st.image(bytes_to_pil(st.session_state.dxf_landuse_hatch_bytes),
+                     caption="Image 2: landuse_hatch.png", use_container_width=True)
+            st.download_button(
+                "⬇️ landuse_hatch.png",
+                data=st.session_state.dxf_landuse_hatch_bytes,
+                file_name="landuse_hatch.png", mime="image/png",
+            )
         st.success("확인됨. '다음 ▶'으로 이동하세요.")
+    else:
+        st.warning("DXF 업로드 후 'PNG 2장 생성'을 눌러야 다음 단계로 이동할 수 있습니다.")
 
 # ══════════════════════════════════════════════════════════════
 # STEP 1: 토지이용계획표
 # ══════════════════════════════════════════════════════════════
 elif cur_step == 1:
-    st.markdown('<div class="section-header">② 토지이용계획표</div>', unsafe_allow_html=True)
-    st.caption("각 토지이용 항목의 RGB 색상, 면적, 용도 설명을 설정하세요.")
+    st.markdown('<div class="section-header">② 레이어·프롬프트 확인</div>', unsafe_allow_html=True)
+    st.caption("DXF에서 파싱된 레이어명, RGB, 면적, 용도 추정값을 확인·수정합니다.")
 
     if st.button("색상/면적 다시 계산", type="secondary"):
         st.session_state["_auto_generated"] = False
@@ -1498,15 +1749,20 @@ elif cur_step == 1:
 # STEP 2: 생성
 # ══════════════════════════════════════════════════════════════
 else:
-    st.markdown('<div class="section-header">③ 이미지 생성</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">③ 조감도 생성</div>', unsafe_allow_html=True)
 
     if not GENAI_AVAILABLE:
         st.error("google-genai 패키지가 없습니다.")
         st.stop()
 
-    if not st.session_state.img_landuse_bytes:
-        st.error("토지이용계획도가 없습니다. 이전 단계로 돌아가세요.")
+    if not st.session_state.dxf_landuse_hatch_bytes:
+        st.error("DXF 기반 landuse_hatch.png가 없습니다. STEP ①에서 PNG 2장을 먼저 생성하세요.")
         st.stop()
+
+    # DXF 기반 입력을 생성 파이프라인에 주입
+    st.session_state.img_landuse_bytes = st.session_state.dxf_landuse_hatch_bytes
+    if st.session_state.dxf_satellite_base_bytes:
+        st.session_state.img_sat_bytes = st.session_state.dxf_satellite_base_bytes
 
     api_key = st.text_input("Google AI Studio API 키", type="password").strip()
     st.caption("모델: %s" % MODEL_NAME)
