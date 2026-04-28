@@ -3,6 +3,9 @@
 # 입력: 토지이용계획도 + 위성사진(선택) + 토지이용계획표 (RGB 매핑)
 # 3-STEP: PASS1(2D배치도) → PASS2(3D조감도) → PASS3(각도변환)
 
+import tempfile
+import os
+from collections import Counter, defaultdict
 from io import BytesIO
 
 import streamlit as st
@@ -28,6 +31,12 @@ try:
 except Exception:
     CV2_AVAILABLE = False
     np = None  # type: ignore
+
+EZDXF_AVAILABLE = True
+try:
+    import ezdxf
+except Exception:
+    EZDXF_AVAILABLE = False
 
 # ──────────────────────────────────────────────────────────────
 # 페이지 설정
@@ -274,7 +283,11 @@ def ensure_session():
         "pass3_outputs": [],
         "pass3_selected_idx": 0,
         "_auto_colors": [],
+        "_auto_generated": False,
         "_errors": [],
+        "dxf_bytes": None,
+        "dxf_layer_table": [],
+        "use_dxf_mapping": True,
     }
     for k, v in defs.items():
         if k not in st.session_state:
@@ -310,7 +323,7 @@ def make_default_table():
     ]
 
 if not st.session_state.land_use_table:
-    st.session_state.land_use_table = make_default_table()
+    st.session_state.land_use_table = []
 
 # ──────────────────────────────────────────────────────────────
 # 이미지 유틸
@@ -322,6 +335,118 @@ def pil_to_png_bytes(img: Image.Image) -> bytes:
 
 def bytes_to_pil(b: bytes) -> Image.Image:
     return Image.open(BytesIO(b)).convert("RGB")
+
+# ──────────────────────────────────────────────────────────────
+# DXF 색상 추출
+# ──────────────────────────────────────────────────────────────
+def aci_to_rgb(aci: int):
+    aci_map = {
+        1: (255, 0, 0),
+        2: (255, 255, 0),
+        3: (0, 255, 0),
+        4: (0, 255, 255),
+        5: (0, 0, 255),
+        6: (255, 0, 255),
+        7: (255, 255, 255),
+        8: (128, 128, 128),
+        9: (192, 192, 192),
+    }
+    return aci_map.get(int(aci), (180, 180, 180))
+
+
+def true_color_to_rgb(true_color: int):
+    r = (true_color >> 16) & 255
+    g = (true_color >> 8) & 255
+    b = true_color & 255
+    return (r, g, b)
+
+
+def guess_preset_from_layer(layer_name: str):
+    name = layer_name.lower()
+    if "공원" in name or "park" in name:
+        return "근린공원·주제공원", "Neighborhood park, tree canopy, walking paths, no buildings"
+    if "녹지" in name or "green" in name:
+        return "근린공원·주제공원", "Green buffer, dense planting, walking paths, no buildings"
+    if "하천" in name or "수변" in name or "water" in name:
+        return "하천·수변공간", "River corridor, riparian planting, boardwalk, no buildings"
+    if "도로" in name or "road" in name:
+        return "광장·공공공지", "Road network, asphalt surface, lane markings, curb lines"
+    if "주차" in name or "parking" in name:
+        return "주차장", "Surface or structured parking lot, organized layout"
+    if "상업" in name or "commercial" in name:
+        return "일반상업용지", "Commercial district, mixed retail buildings, active street frontage"
+    if "복합" in name or "mixed" in name:
+        return "복합용지(혼합개발)", "Mixed-use development zone, podium base with tower elements"
+    if "산업" in name or "지원시설" in name or "industrial" in name:
+        return "첨단산업단지(R&D·지식산업)", "Business, R&D and light industrial campus, 3~8F"
+    if "주거" in name or "res" in name:
+        return "공동주택(판상형 아파트)", "Medium-density residential blocks with landscaped courtyards"
+    return "[직접입력]", ""
+
+
+def extract_dxf_layer_colors(dxf_bytes: bytes) -> list:
+    if not EZDXF_AVAILABLE:
+        return []
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp:
+        tmp.write(dxf_bytes)
+        tmp_path = tmp.name
+
+    try:
+        doc = ezdxf.readfile(tmp_path)
+        msp = doc.modelspace()
+
+        layer_color_counter = defaultdict(Counter)
+        layer_entity_counter = Counter()
+        target_types = {"HATCH", "LWPOLYLINE", "POLYLINE"}
+
+        for e in msp:
+            try:
+                if e.dxftype() not in target_types:
+                    continue
+                layer_name = e.dxf.layer
+                layer_entity_counter[layer_name] += 1
+                rgb = None
+                if e.dxf.hasattr("true_color") and e.dxf.true_color is not None:
+                    rgb = true_color_to_rgb(e.dxf.true_color)
+                elif e.dxf.hasattr("color") and int(e.dxf.color) not in [0, 256]:
+                    rgb = aci_to_rgb(int(e.dxf.color))
+                else:
+                    layer = doc.layers.get(layer_name)
+                    if layer.dxf.hasattr("true_color") and layer.dxf.true_color is not None:
+                        rgb = true_color_to_rgb(layer.dxf.true_color)
+                    else:
+                        rgb = aci_to_rgb(int(layer.dxf.color))
+                layer_color_counter[layer_name][rgb] += 1
+            except Exception:
+                continue
+
+        rows = []
+        for layer_name, counter in layer_color_counter.items():
+            if not counter:
+                continue
+            rgb, _ = counter.most_common(1)[0]
+            r, g, b = rgb
+            preset, custom_desc = guess_preset_from_layer(layer_name)
+            rows.append({
+                "layer": layer_name,
+                "name": layer_name,
+                "r": r, "g": g, "b": b,
+                "hex": "#%02X%02X%02X" % (r, g, b),
+                "preset": preset,
+                "custom_desc": custom_desc,
+                "area_sqm": 0.0,
+                "tolerance": 20,
+                "enabled": True,
+                "entity_count": int(layer_entity_counter[layer_name]),
+            })
+        return rows
+
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
 
 # ──────────────────────────────────────────────────────────────
 # 마스크 추출 + 클립 (경계 이탈 원천 차단)
@@ -432,13 +557,11 @@ def extract_dominant_colors(img_bytes: bytes, n_colors: int = 20) -> list:
     if not (CV2_AVAILABLE and np is not None):
         return []
     arr = np.array(bytes_to_pil(img_bytes)).reshape(-1, 3)
-
     # 흰색 배경만 제외, 검정 도로는 포함
     arr = arr[~((arr[:, 0] > 240) & (arr[:, 1] > 240) & (arr[:, 2] > 240))]
     if len(arr) < 100:
         return []
 
-    # 색상 양자화: 안티앨리어싱/경계 노이즈 완화
     arr_q = (arr // 4 * 4).astype(np.int32)
     keys = arr_q[:, 0] * 65536 + arr_q[:, 1] * 256 + arr_q[:, 2]
     unique, counts = np.unique(keys, return_counts=True)
@@ -459,6 +582,73 @@ def extract_dominant_colors(img_bytes: bytes, n_colors: int = 20) -> list:
         if len(results) >= n_colors:
             break
     return results
+
+def build_table_from_detected_colors(
+    img_bytes: bytes,
+    site_area_sqm: float,
+    n_colors: int = 20,
+    white_threshold: int = 240,
+) -> list:
+    """
+    흰 배경 토지이용계획도에서 RGB 색상별 면적비를 추정하여
+    토지이용 항목 목록을 자동 생성한다.
+
+    기준:
+    - 흰색 배경만 제외
+    - 검정 도로는 항상 전체면적에 포함
+    - 각 픽셀은 가장 가까운 대표 RGB 1개에만 배정
+    - 면적 = 사용자 입력 총면적 × 픽셀비율
+    """
+    if not (CV2_AVAILABLE and np is not None):
+        return []
+
+    arr = np.array(bytes_to_pil(img_bytes))
+
+    white_bg = (
+        (arr[:, :, 0] >= white_threshold) &
+        (arr[:, :, 1] >= white_threshold) &
+        (arr[:, :, 2] >= white_threshold)
+    )
+
+    valid_mask = ~white_bg
+    valid_pixels = arr[valid_mask].astype(np.int16)
+
+    if valid_pixels.shape[0] < 100:
+        return []
+
+    colors = extract_dominant_colors(img_bytes, n_colors=n_colors)
+    color_list = [(int(r), int(g), int(b)) for r, g, b, _ in colors]
+
+    if not color_list:
+        return []
+
+    palette = np.array(color_list, dtype=np.int16)
+    diff = valid_pixels[:, None, :] - palette[None, :, :]
+    dist2 = np.sum(diff * diff, axis=2)
+    nearest_idx = np.argmin(dist2, axis=1)
+    counts = np.bincount(nearest_idx, minlength=len(palette))
+    total_px = max(1, valid_pixels.shape[0])
+
+    new_rows = []
+    for (r, g, b), cnt in zip(color_list, counts):
+        ratio = float(cnt) / float(total_px)
+        if ratio < 0.003:
+            continue
+        area_sqm = float(site_area_sqm) * ratio
+        is_black = (r < 60 and g < 60 and b < 60)
+        new_rows.append({
+            "name": "도로" if is_black else "",
+            "r": int(r),
+            "g": int(g),
+            "b": int(b),
+            "preset": "[직접입력]" if is_black else "",
+            "custom_desc": "Road network, asphalt surface, lane markings, curb lines" if is_black else "",
+            "area_sqm": round(area_sqm, 1),
+            "tolerance": 20,
+            "enabled": True,
+        })
+
+    return new_rows
 
 # ──────────────────────────────────────────────────────────────
 # RGB 기반 구역 마스크 추출
@@ -706,7 +896,14 @@ def build_pass1_prompt(
                 desc = ZONE_PRESETS_SIMPLE[preset_key].get("prompt_note", preset_key)
             else:
                 desc = row.get("name", z_key)
-            lines.append("  [%s] = %s" % (z_key, desc))
+            user_area = row.get("area_sqm", 0)
+            area_str = " | ~%s sqm" % "{:,.0f}".format(user_area) if user_area > 0 else ""
+            layer_name = row.get("layer", "")
+            rgb_text = "RGB(%d,%d,%d)" % (int(row["r"]), int(row["g"]), int(row["b"]))
+            if layer_name:
+                lines.append("  [%s] Layer '%s' / %s = %s%s" % (z_key, layer_name, rgb_text, desc, area_str))
+            else:
+                lines.append("  [%s] = %s%s" % (z_key, desc, area_str))
     else:
         seen_rgb = set()
         for row in table:
@@ -719,7 +916,11 @@ def build_pass1_prompt(
             preset_key = row.get("preset", "[직접입력]")
             custom = row.get("custom_desc", "").strip()
             desc = custom if custom else ZONE_PRESETS_SIMPLE.get(preset_key, {}).get("prompt_note", row.get("name", ""))
-            lines.append("  RGB(%d,%d,%d) = %s" % (r, g, b, desc))
+            layer_name = row.get("layer", "")
+            if layer_name:
+                lines.append("  Layer '%s' / RGB(%d,%d,%d) = %s" % (layer_name, r, g, b, desc))
+            else:
+                lines.append("  RGB(%d,%d,%d) = %s" % (r, g, b, desc))
 
     lines += [
         "",
@@ -789,7 +990,11 @@ def build_pass2_prompt(table: list) -> str:
         preset_key = row.get("preset", "[직접입력]")
         custom = row.get("custom_desc", "").strip()
         desc = custom[:80] if custom else ZONE_PRESETS_SIMPLE.get(preset_key, {}).get("prompt_note", row.get("name", ""))
-        lines.append("  RGB(%d,%d,%d) = %s" % (r, g, b, desc))
+        layer_name = row.get("layer", "")
+        if layer_name:
+            lines.append("  Layer '%s' / RGB(%d,%d,%d) = %s" % (layer_name, r, g, b, desc))
+        else:
+            lines.append("  RGB(%d,%d,%d) = %s" % (r, g, b, desc))
 
     lines += [
         "",
@@ -934,6 +1139,7 @@ if cur_step == 0:
         f2 = st.file_uploader("토지이용계획도 업로드", type=["png","jpg","jpeg"], key="up_landuse")
         if f2:
             st.session_state.img_landuse_bytes = f2.getvalue()
+            st.session_state["_auto_generated"] = False  # 새 이미지 업로드 시 재생성 가능
         if st.session_state.img_landuse_bytes:
             st.image(bytes_to_pil(st.session_state.img_landuse_bytes),
                      use_container_width=True, caption="토지이용계획도")
@@ -955,6 +1161,37 @@ if cur_step == 0:
         step=1000.0, format="%.0f"
     )
 
+    st.markdown('<div class="sub-label">DXF 입력도면</div>', unsafe_allow_html=True)
+    dxf_file = st.file_uploader(
+        "DXF 업로드 — 구역계/토지이용해치/계획선/획지선 포함",
+        type=["dxf"],
+        key="up_dxf"
+    )
+    if dxf_file:
+        st.session_state.dxf_bytes = dxf_file.getvalue()
+        if EZDXF_AVAILABLE:
+            rows = extract_dxf_layer_colors(st.session_state.dxf_bytes)
+            st.session_state.dxf_layer_table = rows
+            if rows:
+                st.success("DXF 레이어 %d개 추출 완료" % len(rows))
+                st.dataframe(
+                    [
+                        {
+                            "레이어": r["layer"],
+                            "RGB": "%d,%d,%d" % (r["r"], r["g"], r["b"]),
+                            "HEX": r["hex"],
+                            "추정 프리셋": r["preset"],
+                            "객체수": r["entity_count"],
+                        }
+                        for r in rows
+                    ],
+                    use_container_width=True,
+                )
+            else:
+                st.warning("DXF에서 해치/폴리라인 레이어 색상을 추출하지 못했습니다.")
+        else:
+            st.error("ezdxf 패키지가 필요합니다. pip install ezdxf")
+
     if not st.session_state.img_landuse_bytes:
         st.warning("토지이용계획도는 필수입니다. 업로드 후 다음 단계로 이동하세요.")
     else:
@@ -965,12 +1202,49 @@ if cur_step == 0:
 # ══════════════════════════════════════════════════════════════
 elif cur_step == 1:
     st.markdown('<div class="section-header">② 토지이용계획표</div>', unsafe_allow_html=True)
-    st.caption("각 토지이용 항목의 RGB 색상과 용도 설명을 설정하세요. 색상별 면적은 자동 산정하지 않습니다.")
+    st.caption("각 토지이용 항목의 RGB 색상, 면적, 용도 설명을 설정하세요.")
 
-    if st.button("색상 다시 계산", type="secondary"):
+    if st.button("색상/면적 다시 계산", type="secondary"):
         st.session_state["_auto_generated"] = False
         st.session_state.land_use_table = []
         st.rerun()
+
+    # DXF 레이어 기반 자동 생성
+    with st.expander("🧩 DXF 레이어 기반 토지이용표 자동 생성", expanded=True):
+        st.caption("DXF에서 추출한 레이어명/RGB를 토지이용계획표 초안으로 적용합니다.")
+        if st.session_state.dxf_layer_table:
+            st.dataframe(
+                [
+                    {
+                        "레이어": r["layer"],
+                        "RGB": "%d,%d,%d" % (r["r"], r["g"], r["b"]),
+                        "HEX": r["hex"],
+                        "추정 프리셋": r["preset"],
+                        "객체수": r["entity_count"],
+                    }
+                    for r in st.session_state.dxf_layer_table
+                ],
+                use_container_width=True,
+            )
+            if st.button("DXF 레이어/RGB를 토지이용표에 적용", type="primary"):
+                st.session_state.land_use_table = [
+                    {
+                        "layer": r["layer"],
+                        "name": r["name"],
+                        "r": r["r"], "g": r["g"], "b": r["b"],
+                        "preset": r["preset"],
+                        "custom_desc": r["custom_desc"],
+                        "area_sqm": r.get("area_sqm", 0.0),
+                        "tolerance": r.get("tolerance", 20),
+                        "enabled": r.get("enabled", True),
+                    }
+                    for r in st.session_state.dxf_layer_table
+                ]
+                st.session_state["_auto_generated"] = True
+                st.success("DXF 기반 토지이용표가 적용되었습니다.")
+                st.rerun()
+        else:
+            st.info("STEP ①에서 DXF를 먼저 업로드하세요.")
 
     # 엑셀 업로드
     with st.expander("📥 엑셀로 토지이용계획표 불러오기", expanded=False):
@@ -1036,61 +1310,55 @@ elif cur_step == 1:
             except Exception as _e:
                 st.error("엑셀 파일 오류: %s" % str(_e))
 
-    # 색상 자동 추출: 이미지 업로드 후 자동으로 RGB 항목 생성
-    # 색상별 면적은 산정하지 않고, RGB/용도 매핑만 사용
-    if st.session_state.img_landuse_bytes and CV2_AVAILABLE:
+    # 색상 자동 추출 (DXF가 있으면 건너뜀)
+    if (
+        st.session_state.img_landuse_bytes
+        and CV2_AVAILABLE
+        and not st.session_state.dxf_layer_table
+    ):
+
+        # 이미 한 번 생성했는지 체크 (중복 방지)
         if not st.session_state.get("_auto_generated", False):
-            with st.spinner("색상 자동 감지 중..."):
+
+            with st.spinner("색상 및 면적 자동 계산 중..."):
+
                 colors = extract_dominant_colors(
                     st.session_state.img_landuse_bytes,
                     n_colors=40
                 )
+
                 new_rows = []
-                seen_rgb = set()
 
                 arr = np.array(bytes_to_pil(st.session_state.img_landuse_bytes))
+
                 white_bg = (
                     (arr[:, :, 0] > 240) &
                     (arr[:, :, 1] > 240) &
                     (arr[:, :, 2] > 240)
                 )
+
+                # 흰색만 제외. 검정 도로 포함.
                 valid_mask = ~white_bg
                 total_px = max(1, int(np.count_nonzero(valid_mask)))
-
                 for r, g, b, _ in colors:
                     r, g, b = int(r), int(g), int(b)
                     tol = 20
-
-                    rgb_key = (r, g, b)
-                    if rgb_key in seen_rgb:
-                        continue
-                    seen_rgb.add(rgb_key)
-
-                    lo = np.array(
-                        [max(0, r - tol), max(0, g - tol), max(0, b - tol)],
-                        dtype=np.uint8
-                    )
-                    hi = np.array(
-                        [min(255, r + tol), min(255, g + tol), min(255, b + tol)],
-                        dtype=np.uint8
-                    )
+                    lo = np.array([max(0, r - tol), max(0, g - tol), max(0, b - tol)], dtype=np.uint8)
+                    hi = np.array([min(255, r + tol), min(255, g + tol), min(255, b + tol)], dtype=np.uint8)
                     mask = cv2.inRange(arr, lo, hi)
                     mask = (mask > 0) & valid_mask
-
-                    # 면적 산정용이 아니라 색상 노이즈 제거용 비율만 사용
-                    ratio = int(np.count_nonzero(mask)) / total_px
+                    area_px = int(np.count_nonzero(mask))
+                    ratio = area_px / total_px
                     if ratio < 0.003:
                         continue
-
+                    area_sqm = float(st.session_state.site_area_sqm) * ratio
                     is_black = (r < 60 and g < 60 and b < 60)
                     new_rows.append({
                         "name": "도로" if is_black else "",
-                        "r": r,
-                        "g": g,
-                        "b": b,
-                        "preset": "[직접입력]",
+                        "r": r, "g": g, "b": b,
+                        "preset": "[직접입력]" if is_black else "",
                         "custom_desc": "Road network, asphalt surface, lane markings, curb lines" if is_black else "",
-                        "area_sqm": 0.0,
+                        "area_sqm": round(area_sqm, 1),
                         "tolerance": tol,
                         "enabled": True,
                     })
@@ -1115,7 +1383,7 @@ elif cur_step == 1:
                 st.session_state.land_use_table.append({
                     "name": item[0], "r": item[1][0], "g": item[1][1], "b": item[1][2],
                     "preset": item[2], "custom_desc": "",
-                    "area_sqm": 0.0, "tolerance": 25, "enabled": True,
+                    "area_sqm": 10000.0, "tolerance": 25, "enabled": True,
                 })
                 st.rerun()
 
@@ -1131,7 +1399,7 @@ elif cur_step == 1:
                 st.session_state.land_use_table.append({
                     "name": new_name, "r": int(new_r), "g": int(new_g), "b": int(new_b),
                     "preset": new_preset, "custom_desc": "",
-                    "area_sqm": 0.0, "tolerance": 25, "enabled": True,
+                    "area_sqm": 10000.0, "tolerance": 25, "enabled": True,
                 })
                 st.rerun()
 
@@ -1144,24 +1412,24 @@ elif cur_step == 1:
 
     to_delete = []
     for i, row in enumerate(table):
-        c_en, c_name, c_r, c_g, c_b, c_tol, c_preset, c_chip, c_del = st.columns(
-            [0.4, 1.8, 0.6, 0.6, 0.6, 0.7, 2.0, 0.5, 0.4]
+        c_en, c_layer, c_name, c_r, c_g, c_b, c_tol, c_area, c_preset, c_chip, c_del = st.columns(
+            [0.4, 1.6, 1.6, 0.6, 0.6, 0.6, 0.7, 1.1, 2.0, 0.5, 0.4]
         )
         r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
         hex_color = "#%02x%02x%02x" % (r, g, b)
 
         table[i]["enabled"]   = c_en.checkbox("", value=row.get("enabled", True), key="en_%d" % i)
-        table[i]["name"]      = c_name.text_input("", value=row.get("name", ""), key="name_%d" % i, label_visibility="collapsed")
+        table[i]["layer"]     = c_layer.text_input("", value=row.get("layer", ""), key="layer_%d" % i, label_visibility="collapsed", placeholder="DXF Layer")
+        table[i]["name"]      = c_name.text_input("", value=row.get("name", ""), key="name_%d" % i, label_visibility="collapsed", placeholder="용도 입력")
         table[i]["r"]         = c_r.number_input("R", 0, 255, r, key="r_%d" % i, label_visibility="collapsed")
         table[i]["g"]         = c_g.number_input("G", 0, 255, g, key="g_%d" % i, label_visibility="collapsed")
         table[i]["b"]         = c_b.number_input("B", 0, 255, b, key="b_%d" % i, label_visibility="collapsed")
         table[i]["tolerance"] = c_tol.number_input("Tol", 5, 80, int(row.get("tolerance", 25)), key="tol_%d" % i, label_visibility="collapsed")
+        table[i]["area_sqm"]  = c_area.number_input("sqm", 0.0, 9999999.0, float(row.get("area_sqm", 10000.0)), step=500.0, key="area_%d" % i, label_visibility="collapsed")
 
-        cur_preset = row.get("preset", "[직접입력]")
-        if cur_preset not in PRESET_OPTIONS:
-            cur_preset = "[직접입력]"
+        cur_preset = row.get("preset", "")
         table[i]["preset"] = c_preset.selectbox(
-            "", PRESET_OPTIONS, index=PRESET_OPTIONS.index(cur_preset),
+            "", PRESET_OPTIONS, index=None if cur_preset == "" else PRESET_OPTIONS.index(cur_preset) if cur_preset in PRESET_OPTIONS else 0,
             key="preset_%d" % i, label_visibility="collapsed"
         )
 
@@ -1210,9 +1478,18 @@ elif cur_step == 1:
             else:
                 st.warning("추출된 구역 없음. RGB 값과 tolerance를 조정하세요.")
 
-    st.info(
-        "색상별 면적은 자동 산정하지 않습니다. "
-        "전체 대상지면적은 생성 이미지의 스케일 참고값으로만 사용됩니다."
+    # 면적 합계
+    total_area = sum(row.get("area_sqm", 0) for row in table if row.get("enabled", True))
+    site_area  = st.session_state.site_area_sqm
+    diff = site_area - total_area
+    diff_color = "#DC2626" if abs(diff) > site_area * 0.05 else "#16A34A"
+    st.markdown(
+        '<div style="background:#F0FDF4;border:1px solid #86EFAC;border-radius:8px;'
+        'padding:12px 16px;margin-top:12px;">'
+        '<b>면적 합계:</b> 개별 합계 <b>%s㎡</b> / 전체 부지 <b>%s㎡</b> / '
+        '차이 <b style="color:%s;">%+.0f㎡</b></div>'
+        % ("{:,.0f}".format(total_area), "{:,.0f}".format(site_area), diff_color, diff),
+        unsafe_allow_html=True
     )
 
     st.success("설정 완료 시 '다음 ▶'로 이동하여 이미지를 생성하세요.")
