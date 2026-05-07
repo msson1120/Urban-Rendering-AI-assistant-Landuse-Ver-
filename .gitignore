@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+.streamlit/secrets.toml
+
+outputs/
+temp/
+*.png
+*.jpg
+*.jpeg
+*.dxf
+*.dwg
+*.zip
