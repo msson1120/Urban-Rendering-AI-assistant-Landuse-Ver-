@@ -420,6 +420,7 @@ def get_vworld_api_key():
         return DEFAULT_VWORLD_API_KEY
 VWORLD_SAT_URL = "https://api.vworld.kr/req/wmts/1.0.0/{key}/Satellite/{z}/{y}/{x}.jpeg"
 VWORLD_BASE_URL = "https://api.vworld.kr/req/wmts/1.0.0/{key}/Base/{z}/{y}/{x}.png"
+APP_BASE_URL = "https://ayi2gjjayr2dsenmoknrpg.streamlit.app/"
 
 DEFAULT_MAP_ZOOM = 17
 DEFAULT_EXPORT_ZOOM = 19
@@ -882,6 +883,7 @@ def tile_bounds_mercator(x, y, z):
 
 def fetch_vworld_tile(key, z, x, y, layer="Satellite"):
     if not REQUESTS_AVAILABLE or not key:
+        st.session_state["vworld_last_error"] = "requests 패키지 없음 또는 VWorld API Key 없음"
         return None
 
     if layer == "Satellite":
@@ -890,28 +892,36 @@ def fetch_vworld_tile(key, z, x, y, layer="Satellite"):
         url = VWORLD_BASE_URL.format(key=key, z=z, x=x, y=y)
 
     try:
-        resp = requests.get(
-            url,
-            timeout=10,
-            headers={"User-Agent": "Mozilla/5.0 PlanVision/1.0"}
-        )
+        headers = {
+            "User-Agent": "Mozilla/5.0 PlanVisionAI/1.0",
+            "Referer": APP_BASE_URL,
+        }
 
+        resp = requests.get(url, timeout=15, headers=headers)
         content_type = resp.headers.get("Content-Type", "")
 
         if resp.status_code == 200 and resp.content and "image" in content_type.lower():
             return Image.open(BytesIO(resp.content)).convert("RGB")
 
+        body_preview = ""
+        try:
+            body_preview = resp.text[:300]
+        except Exception:
+            body_preview = str(resp.content[:100])
+
         st.session_state["vworld_last_error"] = (
-            f"status={resp.status_code}, content-type={content_type}, url={url}"
+            f"status={resp.status_code}, "
+            f"content-type={content_type}, "
+            f"url={url}, "
+            f"body={body_preview}"
         )
         return None
 
     except Exception as e:
-        st.session_state["vworld_last_error"] = str(e)
+        st.session_state["vworld_last_error"] = repr(e)
         return None
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
 def fetch_vworld_tile_cached(key, z, x, y, layer="Satellite"):
     return fetch_vworld_tile(key, z, x, y, layer)
 
