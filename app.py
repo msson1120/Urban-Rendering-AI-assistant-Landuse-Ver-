@@ -5,11 +5,38 @@
 
 import tempfile
 import os
+import json
+import math
+import re
+import shutil
+import subprocess
 from collections import Counter, defaultdict
 from io import BytesIO
 
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFilter
+
+try:
+    from streamlit_folium import st_folium
+except Exception:
+    st_folium = None
+
+try:
+    from pyproj import Transformer
+    PYPROJ_AVAILABLE = True
+except Exception:
+    PYPROJ_AVAILABLE = False
+
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except Exception:
+    REQUESTS_AVAILABLE = False
+
+try:
+    import folium
+except Exception:
+    folium = None
 
 # ── 선택적 의존성 ──────────────────────────────────────────────
 GENAI_AVAILABLE = True
@@ -35,6 +62,7 @@ except Exception:
 EZDXF_AVAILABLE = True
 try:
     import ezdxf
+    from ezdxf.colors import aci2rgb
 except Exception:
     EZDXF_AVAILABLE = False
 
@@ -300,6 +328,24 @@ def ensure_session():
 
 ensure_session()
 
+# DXF/VWorld 추출 단계에서 쓰는 추가 세션값
+for _k, _v in {
+    "dxf_rows": [],
+    "dxf_geojson": None,
+    "gdal_geojson": None,
+    "hatch_area_map": {},
+    "records": [],
+    "preview_png": None,
+    "satellite_base_png": None,
+    "landuse_hatch_png": None,
+    "bbox_3857": None,
+    "prompt_text": "",
+    "export_bbox_3857": None,
+}.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
+
+
 # ──────────────────────────────────────────────────────────────
 # 기본 테이블
 # ──────────────────────────────────────────────────────────────
@@ -341,22 +387,942 @@ def pil_to_png_bytes(img: Image.Image) -> bytes:
 def bytes_to_pil(b: bytes) -> Image.Image:
     return Image.open(BytesIO(b)).convert("RGB")
 
+
+# ──────────────────────────────────────────────────────────────
+# DXF/VWorld 고정밀 PNG 추출 유틸 — app_dxf_vworld_mvp.py 통합
+# ──────────────────────────────────────────────────────────────
+# -----------------------------
+# Constants
+# -----------------------------
+CRS_OPTIONS = {
+    "EPSG:5174 - Korean 1985 / Modified Central Belt": 5174,
+    "EPSG:5179 - Korea 2000 / Unified CS": 5179,
+    "EPSG:5186 - Korea 2000 / Central Belt": 5186,
+    "EPSG:5187 - Korea 2000 / East Belt": 5187,
+    "EPSG:4326 - WGS84": 4326,
+}
+
+IMG_SIZE_OPTIONS = {
+    "1024 x 768": (1024, 768),
+    "1280 x 960": (1280, 960),
+    "1600 x 1200": (1600, 1200),
+    "2048 x 1536": (2048, 1536),
+}
+
+# VWorld WMTS/TMS tile URL pattern.
+# Satellite uses jpeg; Base/Hybrid use png in most examples.
+VWORLD_API_KEY = "05CD1D67-6203-3E82-BFDA-BBC5DE6AA857"
+VWORLD_SAT_URL = "https://api.vworld.kr/req/wmts/1.0.0/{key}/Satellite/{z}/{y}/{x}.jpeg"
+VWORLD_BASE_URL = "https://api.vworld.kr/req/wmts/1.0.0/{key}/Base/{z}/{y}/{x}.png"
+
+DEFAULT_MAP_ZOOM = 17
+DEFAULT_EXPORT_ZOOM = 19
+DEFAULT_EXPORT_SCALE = 2
+
+# -----------------------------
+# Layer rules
+# -----------------------------
+def clean_layer_name(layer_name: str) -> str:
+    return str(layer_name).replace(" ", "").replace("_", "").replace("-", "").replace(".", "").lower()
+
+
+def is_boundary_layer(layer_name: str) -> bool:
+    n = clean_layer_name(layer_name)
+    return "구역계" in n or "boundary" in n or "사업대상지" in n
+
+
+def is_plan_line_layer(layer_name: str) -> bool:
+    n = clean_layer_name(layer_name)
+    plan_keywords = [
+        "계획선",
+        "획지선",
+        "가구선",
+        "도로선",
+        "중심선",
+        "planline",
+        "parcelline",
+    ]
+    return any(k in n for k in plan_keywords)
+
+
+def is_landuse_layer(layer_name: str) -> bool:
+    n = clean_layer_name(layer_name)
+    if is_boundary_layer(layer_name) or is_plan_line_layer(layer_name):
+        return False
+    keys = [
+        "h공원", "h녹지", "h도로", "h도시지원시설", "h보행자전용도로",
+        "h복합용지", "h산업", "h산업복합", "h산업지원시설", "h소하천", "h주차장",
+        "공원", "녹지", "도로", "도시지원시설", "복합", "산업", "상업", "주차", "하천", "수변", "주거"
+    ]
+    return any(k in n for k in keys)
+
+
+def guess_program_from_layer(layer_name: str) -> str:
+    n = clean_layer_name(layer_name)
+    if "공원" in n:
+        return "landscape park / neighborhood park, no buildings"
+    if "녹지" in n:
+        return "green buffer / landscape open space, no buildings"
+    if "하천" in n or "소하천" in n or "수변" in n:
+        return "river / waterfront corridor, riparian landscape, no buildings"
+    if "도로" in n:
+        return "road network / asphalt roads / pedestrian and vehicle circulation"
+    if "주차" in n:
+        return "parking facility / surface or structured parking"
+    if "상업" in n:
+        return "commercial / mixed-use commercial district"
+    if "복합" in n:
+        return "mixed-use development zone, podium and tower composition"
+    if "도시지원" in n or "산업지원" in n:
+        return "urban support facility / business support / civic-industrial support"
+    if "산업" in n:
+        return "business, R&D and light industrial campus"
+    if "주거" in n:
+        return "residential blocks with landscaped courtyards"
+    return "user-defined land use program"
+
+# -----------------------------
+# DXF utilities
+# -----------------------------
+def aci_to_rgb(aci: int):
+    try:
+        rgb = aci2rgb(int(aci))
+        return (int(rgb.r), int(rgb.g), int(rgb.b))
+    except Exception:
+        return (180, 180, 180)
+
+
+def true_color_to_rgb(true_color: int):
+    r = (true_color >> 16) & 255
+    g = (true_color >> 8) & 255
+    b = true_color & 255
+    return (r, g, b)
+
+
+def entity_rgb(doc, e):
+    try:
+        if e.dxf.hasattr("true_color") and e.dxf.true_color is not None:
+            return true_color_to_rgb(e.dxf.true_color)
+        if e.dxf.hasattr("color") and int(e.dxf.color) not in [0, 256]:
+            return aci_to_rgb(int(e.dxf.color))
+        layer = doc.layers.get(e.dxf.layer)
+        if layer.dxf.hasattr("true_color") and layer.dxf.true_color is not None:
+            return true_color_to_rgb(layer.dxf.true_color)
+        return aci_to_rgb(int(layer.dxf.color))
+    except Exception:
+        return (180, 180, 180)
+
+
+def write_temp_dxf(dxf_bytes: bytes) -> str:
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".dxf")
+    tmp.write(dxf_bytes)
+    tmp.close()
+    return tmp.name
+
+
+def find_ogr2ogr():
+    exe = shutil.which("ogr2ogr")
+    if exe:
+        return exe
+    candidates = [
+        r"C:\Program Files\QGIS 3.44.1\bin\ogr2ogr.exe",
+        r"C:\Program Files\QGIS 3.44.0\bin\ogr2ogr.exe",
+        r"C:\Program Files\QGIS 3.40.0\bin\ogr2ogr.exe",
+        r"C:\Program Files\QGIS 3.38.0\bin\ogr2ogr.exe",
+        r"C:\Program Files\QGIS 3.36.0\bin\ogr2ogr.exe",
+        r"C:\Program Files\QGIS 3.34.0\bin\ogr2ogr.exe",
+        r"C:\OSGeo4W\bin\ogr2ogr.exe",
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+
+    # QGIS 버전 폴더 자동 스캔
+    qgis_root = r"C:\Program Files"
+    try:
+        for name in os.listdir(qgis_root):
+            if name.startswith("QGIS "):
+                p = os.path.join(qgis_root, name, "bin", "ogr2ogr.exe")
+                if os.path.exists(p):
+                    return p
+    except Exception:
+        pass
+
+    raise RuntimeError(
+        "ogr2ogr.exe를 자동으로 찾지 못했습니다. "
+        "QGIS가 C:\\Program Files\\QGIS x.xx.x 경로에 설치되어 있는지 확인하세요."
+    )
+
+
+def dxf_to_geojson_by_gdal(dxf_bytes: bytes, src_epsg: int):
+    """GDAL/OGR 방식으로 표시용 WGS84 GeoJSON을 생성."""
+    ogr2ogr = find_ogr2ogr()
+    with tempfile.TemporaryDirectory() as td:
+        dxf_path = os.path.join(td, "input.dxf")
+        display_path = os.path.join(td, "display_4326.geojson")
+        with open(dxf_path, "wb") as f:
+            f.write(dxf_bytes)
+
+        cmd_display = [
+            ogr2ogr,
+            "-f", "GeoJSON",
+            display_path,
+            dxf_path,
+            "-s_srs", f"EPSG:{src_epsg}",
+            "-t_srs", "EPSG:4326",
+            "-lco", "RFC7946=YES",
+            "-nlt", "PROMOTE_TO_MULTI",
+            "-skipfailures",
+        ]
+
+        result = subprocess.run(cmd_display, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr or result.stdout or "ogr2ogr 변환 실패")
+
+        with open(display_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+
+def build_layer_rgb_map_from_dxf(dxf_bytes: bytes):
+    """DXF 원본에서 레이어별 대표 RGB 추출. GDAL geometry + ezdxf color 조합용."""
+    if not EZDXF_AVAILABLE:
+        return {}
+    tmp_path = write_temp_dxf(dxf_bytes)
+    try:
+        doc = ezdxf.readfile(tmp_path)
+        msp = doc.modelspace()
+        counter = defaultdict(Counter)
+        for e in msp:
+            try:
+                layer = e.dxf.layer
+                if not (is_landuse_layer(layer) or is_boundary_layer(layer) or is_plan_line_layer(layer)):
+                    continue
+                rgb = entity_rgb(doc, e)
+                counter[layer][rgb] += 1
+            except Exception:
+                continue
+        return {layer: c.most_common(1)[0][0] for layer, c in counter.items() if c}
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+def iter_geojson_geometries(geom):
+    """GeoJSON geometry를 (geom_type, coords) 단위로 분해."""
+    if not geom:
+        return
+    gtype = geom.get("type")
+    coords = geom.get("coordinates", [])
+    if gtype == "Polygon":
+        yield "polygon", coords
+    elif gtype == "MultiPolygon":
+        for poly in coords:
+            yield "polygon", poly
+    elif gtype == "LineString":
+        yield "line", coords
+    elif gtype == "MultiLineString":
+        for line in coords:
+            yield "line", line
+    elif gtype == "GeometryCollection":
+        for g in geom.get("geometries", []):
+            yield from iter_geojson_geometries(g)
+
+
+def get_feature_layer_name(props):
+    """GDAL DXF driver가 넣는 레이어명 필드 후보 처리."""
+    for key in ["Layer", "layer", "LAYER", "Name", "name"]:
+        if key in props and props[key]:
+            return str(props[key])
+    return ""
+
+
+def records_from_gdal_geojson(geojson, dxf_bytes: bytes, src_epsg: int):
+    """GDAL GeoJSON(EPSG:4326)을 draw_records용 EPSG:3857 records로 변환."""
+    t = get_transformer(4326, 3857)
+    layer_rgb_map = build_layer_rgb_map_from_dxf(dxf_bytes)
+    records = []
+    xs, ys = [], []
+    for feat in geojson.get("features", []):
+        props = feat.get("properties", {}) or {}
+        layer = get_feature_layer_name(props)
+        if not layer:
+            continue
+        category = "other"
+        if is_boundary_layer(layer):
+            category = "boundary"
+        elif is_landuse_layer(layer):
+            category = "landuse"
+        elif is_plan_line_layer(layer):
+            category = "line"
+        if category == "other":
+            continue
+        rgb = layer_rgb_map.get(layer, (180, 180, 180))
+        for geom_type, coords in iter_geojson_geometries(feat.get("geometry")):
+            if geom_type == "polygon":
+                if not coords:
+                    continue
+                outer_ll = coords[0]
+                holes_ll = coords[1:] if len(coords) > 1 else []
+                outer_3857 = []
+                for lon, lat, *_rest in outer_ll:
+                    x, y = transform_xy(lon, lat, t)
+                    outer_3857.append((x, y))
+                    xs.append(x); ys.append(y)
+                holes_3857 = []
+                for hole in holes_ll:
+                    h = []
+                    for lon, lat, *_rest in hole:
+                        x, y = transform_xy(lon, lat, t)
+                        h.append((x, y))
+                    if len(h) >= 4:
+                        holes_3857.append(h)
+                if len(outer_3857) >= 4:
+                    records.append({
+                        "layer": layer, "type": "GDAL_POLYGON", "category": category,
+                        "rgb": rgb, "points": outer_3857,
+                        "holes": holes_3857, "geom_type": "polygon",
+                    })
+            elif geom_type == "line":
+                pts_3857 = []
+                for lon, lat, *_rest in coords:
+                    x, y = transform_xy(lon, lat, t)
+                    pts_3857.append((x, y))
+                    xs.append(x); ys.append(y)
+                if len(pts_3857) >= 2:
+                    records.append({
+                        "layer": layer, "type": "GDAL_LINE", "category": category,
+                        "rgb": rgb, "points": pts_3857,
+                        "holes": [], "geom_type": "line",
+                    })
+    bbox = (min(xs), min(ys), max(xs), max(ys)) if xs and ys else None
+    return records, bbox
+
+
+def get_transformer(src_epsg: int, dst_epsg: int):
+    if src_epsg == dst_epsg:
+        return None
+    return Transformer.from_crs(f"EPSG:{src_epsg}", f"EPSG:{dst_epsg}", always_xy=True)
+
+
+def transform_xy(x, y, transformer):
+    if transformer is None:
+        return float(x), float(y)
+    return transformer.transform(float(x), float(y))
+
+
+def close_ring(points):
+    pts = list(points)
+    if pts and pts[0] != pts[-1]:
+        pts.append(pts[0])
+    return pts
+
+
+def polygon_area(points):
+    if len(points) < 3:
+        return 0.0
+    area = 0.0
+    pts = points[:]
+    if pts[0] != pts[-1]:
+        pts.append(pts[0])
+    for (x1, y1), (x2, y2) in zip(pts[:-1], pts[1:]):
+        area += x1 * y2 - x2 * y1
+    return abs(area) * 0.5
+
+
+def sample_arc_edge_safe(edge, flatten_distance=0.01):
+    cx, cy = edge.center
+    radius = float(edge.radius)
+    a0 = math.radians(float(edge.start_angle))
+    a1 = math.radians(float(edge.end_angle))
+    if a1 < a0:
+        a1 += math.tau
+    arc_len = abs(a1 - a0) * radius
+    segs = max(16, min(4096, int(arc_len / max(flatten_distance, 0.001))))
+    pts = []
+    for i in range(segs + 1):
+        a = a0 + (a1 - a0) * i / segs
+        pts.append((float(cx + radius * math.cos(a)), float(cy + radius * math.sin(a))))
+    if hasattr(edge, "ccw") and not edge.ccw:
+        pts.reverse()
+    return pts
+
+
+def compute_hatch_area_by_layer(dxf_bytes):
+    import ezdxf
+    from collections import defaultdict
+
+    tmp_path = write_temp_dxf(dxf_bytes)
+    area_map = defaultdict(float)
+
+    try:
+        doc = ezdxf.readfile(tmp_path)
+        msp = doc.modelspace()
+
+        for e in msp:
+            if e.dxftype() != "HATCH":
+                continue
+
+            layer = e.dxf.layer
+
+            if not is_landuse_layer(layer):
+                continue
+
+            total_area = 0.0
+
+            for path in e.paths:
+                if hasattr(path, "vertices"):
+                    pts = []
+                    for v in path.vertices:
+                        x = float(v[0])
+                        y = float(v[1])
+                        pts.append((x, y))
+
+                    if len(pts) >= 3:
+                        total_area += polygon_area(close_ring(pts))
+
+                elif hasattr(path, "edges"):
+                    pts = []
+                    for edge in path.edges:
+                        if edge.EDGE_TYPE == "LineEdge":
+                            if not pts:
+                                pts.append((float(edge.start[0]), float(edge.start[1])))
+                            pts.append((float(edge.end[0]), float(edge.end[1])))
+
+                        elif edge.EDGE_TYPE == "ArcEdge":
+                            arc_pts = sample_arc_edge_safe(edge, flatten_distance=0.01)
+                            if pts and arc_pts:
+                                pts.extend(arc_pts[1:])
+                            else:
+                                pts.extend(arc_pts)
+
+                    if len(pts) >= 3:
+                        total_area += polygon_area(close_ring(pts))
+
+            area_map[layer] += abs(total_area)
+
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+    return dict(area_map)
+
+
+def build_dxf_layer_table(records, area_map=None):
+    area_map = area_map or {}
+    grouped = {}
+
+    for rec in records:
+        if rec["category"] != "landuse":
+            continue
+
+        layer = rec["layer"]
+
+        if layer not in grouped:
+            grouped[layer] = {
+                "enabled": True,
+                "layer": layer,
+                "color_counter": Counter(),
+                "entity_count": 0,
+            }
+
+        grouped[layer]["entity_count"] += 1
+        grouped[layer]["color_counter"][rec["rgb"]] += 1
+
+    rows = []
+    for layer, g in grouped.items():
+        rgb = g["color_counter"].most_common(1)[0][0] if g["color_counter"] else (180, 180, 180)
+        r, gc, b = rgb
+
+        rows.append({
+            "enabled": True,
+            "layer": layer,
+            "rgb": f"RGB({r},{gc},{b})",
+            "area_sqm": round(float(area_map.get(layer, 0.0)), 1),
+        })
+
+    return sorted(rows, key=lambda r: r["layer"])
+
+
+# -----------------------------
+# Tile utilities
+# -----------------------------
+def mercator_to_tile(x, y, z):
+    origin_shift = 20037508.342789244
+    n = 2 ** z
+    tx = int((x + origin_shift) / (2 * origin_shift) * n)
+    ty = int((origin_shift - y) / (2 * origin_shift) * n)
+    return tx, ty
+
+
+def tile_bounds_mercator(x, y, z):
+    origin_shift = 20037508.342789244
+    n = 2 ** z
+    tile_size = 2 * origin_shift / n
+    minx = x * tile_size - origin_shift
+    maxx = (x + 1) * tile_size - origin_shift
+    maxy = origin_shift - y * tile_size
+    miny = origin_shift - (y + 1) * tile_size
+    return minx, miny, maxx, maxy
+
+
+def fetch_vworld_tile(key, z, x, y, layer="Satellite"):
+    if not REQUESTS_AVAILABLE or not key:
+        return None
+    if layer == "Satellite":
+        url = VWORLD_SAT_URL.format(key=key, z=z, x=x, y=y)
+    else:
+        url = VWORLD_BASE_URL.format(key=key, z=z, x=x, y=y)
+    try:
+        resp = requests.get(url, timeout=8, headers={"User-Agent":"PlanVision/1.0"})
+        if resp.status_code == 200 and resp.content:
+            return Image.open(BytesIO(resp.content)).convert("RGB")
+    except Exception:
+        return None
+    return None
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
+def fetch_vworld_tile_cached(key, z, x, y, layer="Satellite"):
+    return fetch_vworld_tile(key, z, x, y, layer)
+
+
+def expand_bbox_to_aspect(bbox3857, target_w, target_h, padding_ratio=0.05):
+    minx, miny, maxx, maxy = bbox3857
+
+    dx = maxx - minx
+    dy = maxy - miny
+
+    pad = max(dx, dy) * padding_ratio
+    minx -= pad
+    maxx += pad
+    miny -= pad
+    maxy += pad
+
+    dx = maxx - minx
+    dy = maxy - miny
+
+    target_aspect = target_w / target_h
+    bbox_aspect = dx / dy
+
+    cx = (minx + maxx) / 2
+    cy = (miny + maxy) / 2
+
+    if bbox_aspect > target_aspect:
+        # bbox가 너무 넓음 -> 세로 확장
+        new_dy = dx / target_aspect
+        miny = cy - new_dy / 2
+        maxy = cy + new_dy / 2
+    else:
+        # bbox가 너무 높음 -> 가로 확장
+        new_dx = dy * target_aspect
+        minx = cx - new_dx / 2
+        maxx = cx + new_dx / 2
+
+    return minx, miny, maxx, maxy
+
+
+def make_satellite_mosaic(bbox3857, key, z=18, width=1600, height=1200, padding_ratio=0.05):
+    minx, miny, maxx, maxy = expand_bbox_to_aspect(
+        bbox3857,
+        width,
+        height,
+        padding_ratio=padding_ratio,
+    )
+
+    tx_min, ty_max = mercator_to_tile(minx, miny, z)
+    tx_max, ty_min = mercator_to_tile(maxx, maxy, z)
+
+    tile_size = 256
+    mosaic_w = (tx_max - tx_min + 1) * tile_size
+    mosaic_h = (ty_max - ty_min + 1) * tile_size
+
+    mosaic = Image.new("RGB", (mosaic_w, mosaic_h), (245, 245, 245))
+
+    for tx in range(tx_min, tx_max + 1):
+        for ty in range(ty_min, ty_max + 1):
+            tile = fetch_vworld_tile_cached(key, z, tx, ty, layer="Satellite")
+            if tile is None:
+                tile = Image.new("RGB", (tile_size, tile_size), (235, 235, 235))
+            mosaic.paste(tile.resize((tile_size, tile_size)), (
+                (tx - tx_min) * tile_size,
+                (ty - ty_min) * tile_size,
+            ))
+
+    full_minx, full_miny, _, _ = tile_bounds_mercator(tx_min, ty_max, z)
+    _, _, full_maxx, full_maxy = tile_bounds_mercator(tx_max, ty_min, z)
+
+    def x_to_px(x):
+        return int((x - full_minx) / (full_maxx - full_minx) * mosaic_w)
+
+    def y_to_px(y):
+        return int((full_maxy - y) / (full_maxy - full_miny) * mosaic_h)
+
+    crop = (
+        x_to_px(minx),
+        y_to_px(maxy),
+        x_to_px(maxx),
+        y_to_px(miny),
+    )
+
+    cropped = mosaic.crop(crop)
+
+    # 여기서만 최종 크기로 리사이즈
+    out = cropped.resize((width, height), Image.Resampling.LANCZOS)
+
+    return out, (minx, miny, maxx, maxy)
+
+# -----------------------------
+# GeoJSON (WGS84) — 인터랙티브 지도용
+# -----------------------------
+def records_to_geojson(records):
+    """EPSG:3857 레코드를 WGS84 GeoJSON으로 변환."""
+    if not PYPROJ_AVAILABLE:
+        return None
+    t = get_transformer(3857, 4326)
+    features = []
+    for rec in records:
+        pts = []
+        for x, y in rec["points"]:
+            lon, lat = transform_xy(x, y, t)
+            pts.append([lon, lat])
+        if len(pts) < 2:
+            continue
+        r, g, b = rec["rgb"]
+        cat = rec["category"]
+        if cat in ("landuse", "boundary") and len(pts) >= 3:
+            rings = [pts + [pts[0]]]
+            for h in rec.get("holes", []):
+                hole_pts = []
+                for x, y in h:
+                    lon, lat = transform_xy(x, y, t)
+                    hole_pts.append([lon, lat])
+                if len(hole_pts) >= 4:
+                    rings.append(hole_pts + [hole_pts[0]])
+            geom = {"type": "Polygon", "coordinates": rings}
+        else:
+            geom = {"type": "LineString", "coordinates": pts}
+        features.append({
+            "type": "Feature",
+            "properties": {
+                "layer": rec["layer"],
+                "category": cat,
+                "color": "#%02X%02X%02X" % (r, g, b),
+            },
+            "geometry": geom,
+        })
+    return {"type": "FeatureCollection", "features": features}
+
+
+def geojson_center(geojson):
+    """GeoJSON에서 대략적인 중심 [lat, lon] 반환."""
+    lats, lons = [], []
+    for f in geojson.get("features", []):
+        coords = f["geometry"].get("coordinates", [])
+        if f["geometry"]["type"] == "Polygon":
+            coords = coords[0]
+        for pt in coords:
+            if isinstance(pt[0], (int, float)):
+                lons.append(pt[0]); lats.append(pt[1])
+    if not lats:
+        return [36.5, 127.5]
+    return [(min(lats) + max(lats)) / 2, (min(lons) + max(lons)) / 2]
+
+
+def geojson_bounds(geojson):
+    lats, lons = [], []
+    for f in geojson.get("features", []):
+        coords = f["geometry"].get("coordinates", [])
+        if f["geometry"]["type"] == "Polygon":
+            coords = coords[0]
+        for pt in coords:
+            if isinstance(pt[0], (int, float)):
+                lons.append(pt[0])
+                lats.append(pt[1])
+    if not lats:
+        return None
+    return [[min(lats), min(lons)], [max(lats), max(lons)]]
+
+
+def show_interactive_map(
+    geojson,
+    zoom=17,
+    boundary_width=4,
+    landuse_opacity=0.45,
+    line_width=2,
+    show_bbox=False,
+):
+    center = geojson_center(geojson)
+
+    m = folium.Map(
+        location=center,
+        zoom_start=zoom,
+        tiles=None,
+        control_scale=True,
+        zoom_control=True,
+        dragging=True,
+        scrollWheelZoom=True,
+        doubleClickZoom=True,
+        prefer_canvas=True,
+    )
+
+    folium.TileLayer(
+        tiles=f"https://api.vworld.kr/req/wmts/1.0.0/{VWORLD_API_KEY}/Satellite/{{z}}/{{y}}/{{x}}.jpeg",
+        attr="VWorld",
+        name="VWorld Satellite",
+        overlay=False,
+        control=True,
+    ).add_to(m)
+
+    def style_boundary(_):
+        return {"color": "#FF0000", "weight": boundary_width, "fillOpacity": 0}
+
+    def style_landuse(f):
+        color = f["properties"].get("color", "#999999")
+        return {"color": color, "weight": 2, "fillColor": color, "fillOpacity": landuse_opacity}
+
+    def style_line(_):
+        return {"color": "#111111", "weight": line_width, "fillOpacity": 0}
+
+    layer_defs = [
+        ("landuse", "토지이용해치", style_landuse),
+        ("line", "계획선/획지선", style_line),
+        ("boundary", "구역계", style_boundary),
+    ]
+
+    for cat, name, style_func in layer_defs:
+        feats = [f for f in geojson["features"] if f["properties"].get("category") == cat]
+        if feats:
+            folium.GeoJson(
+                {"type": "FeatureCollection", "features": feats},
+                name=name,
+                style_function=style_func,
+                tooltip=folium.GeoJsonTooltip(
+                    fields=["layer", "category"],
+                    aliases=["레이어", "구분"],
+                    sticky=True,
+                ),
+            ).add_to(m)
+
+    bounds = geojson_bounds(geojson)
+    if bounds:
+        m.fit_bounds(bounds)
+        m.options['maxZoom'] = 19
+        if show_bbox:
+            folium.Rectangle(
+                bounds=bounds,
+                color="white",
+                weight=2,
+                fill=False,
+                name="추출 영역",
+            ).add_to(m)
+
+    folium.LayerControl(collapsed=False).add_to(m)
+
+    # 클릭 시 Leaflet 지도에 생기는 검은 focus 테두리 제거
+    m.get_root().html.add_child(folium.Element("""
+<style>
+.leaflet-container:focus,
+.leaflet-container:focus-visible,
+.leaflet-interactive:focus,
+.leaflet-interactive:focus-visible,
+path.leaflet-interactive:focus {
+    outline: none !important;
+    box-shadow: none !important;
+}
+.leaflet-control-scale-line {
+    background: rgba(255,255,255,0.8);
+    padding: 4px;
+    font-size: 11px;
+}
+</style>
+"""))
+    m.get_root().html.add_child(folium.Element("""
+<script>
+setTimeout(function() {
+    var scales = document.getElementsByClassName('leaflet-control-scale-line');
+    for (var i = 0; i < scales.length; i++) {
+        if (scales[i].innerHTML.includes('ft')) {
+            scales[i].style.display = 'none';
+        }
+    }
+}, 500);
+</script>
+"""))
+
+    st_folium(m, height=720, use_container_width=True, returned_objects=[])
+
+
+# -----------------------------
+# Rendering
+# -----------------------------
+def draw_records(
+    base_img,
+    records,
+    bbox3857,
+    mode="preview",
+    show_boundary=True,
+    show_landuse=True,
+    show_lines=True,
+    boundary_width=4,
+    landuse_opacity=145,
+    line_width=2,
+):
+    base_rgba = base_img.convert("RGBA")
+    img = base_rgba.copy()
+    draw = ImageDraw.Draw(img, "RGBA")
+    w, h = img.size
+    minx, miny, maxx, maxy = bbox3857
+
+    def to_px(pt):
+        x, y = pt
+        px = int((x - minx) / (maxx - minx) * w)
+        py = int((maxy - y) / (maxy - miny) * h)
+        return px, py
+
+    # draw order: landuse fill -> lines -> boundary
+    ordered = []
+    if show_landuse:
+        ordered += [r for r in records if r["category"] == "landuse"]
+    if show_lines:
+        ordered += [r for r in records if r["category"] == "line"]
+    if show_boundary:
+        ordered += [r for r in records if r["category"] == "boundary"]
+
+    for rec in ordered:
+        pts = [to_px(p) for p in rec["points"]]
+        if len(pts) < 2:
+            continue
+        cat = rec["category"]
+        r, g, b = rec["rgb"]
+        if cat == "landuse":
+            if len(pts) >= 3:
+                draw.polygon(pts, fill=(r, g, b, landuse_opacity), outline=(r, g, b, 240))
+                for hole in rec.get("holes", []):
+                    hole_px = [to_px(p) for p in hole]
+                    if len(hole_px) >= 3:
+                        mask = Image.new("L", img.size, 0)
+                        mask_draw = ImageDraw.Draw(mask)
+                        mask_draw.polygon(hole_px, fill=255)
+                        if mode == "landuse_hatch":
+                            white_bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+                            img.paste(white_bg, (0, 0), mask)
+                        else:
+                            img.paste(base_rgba, (0, 0), mask)
+                        draw = ImageDraw.Draw(img, "RGBA")
+                        draw.line(hole_px + [hole_px[0]], fill=(r, g, b, 240), width=max(1, line_width))
+        elif cat == "boundary":
+            if len(pts) >= 3:
+                draw.line(pts + [pts[0]], fill=(255, 0, 0, 255), width=boundary_width)
+            else:
+                draw.line(pts, fill=(255, 0, 0, 255), width=boundary_width)
+        elif cat == "line":
+            draw.line(pts, fill=(40, 40, 40, 230), width=line_width)
+    return img.convert("RGB")
+
+
+def make_exports(
+    records,
+    bbox3857,
+    key,
+    z,
+    width,
+    height,
+    show_boundary=True,
+    show_landuse=True,
+    show_lines=True,
+    boundary_width=4,
+    landuse_opacity=145,
+    line_width=2,
+):
+    sat, padded_bbox = make_satellite_mosaic(bbox3857, key, z=z, width=width, height=height)
+    preview = draw_records(
+        sat.copy(), records, padded_bbox,
+        show_boundary=show_boundary, show_landuse=show_landuse, show_lines=show_lines,
+        boundary_width=boundary_width, landuse_opacity=landuse_opacity, line_width=line_width,
+    )
+    satellite_base = draw_records(
+        sat.copy(), records, padded_bbox,
+        show_boundary=True, show_landuse=False, show_lines=False,
+        boundary_width=boundary_width, landuse_opacity=landuse_opacity, line_width=line_width,
+    )
+    white = Image.new("RGB", (width, height), (255, 255, 255))
+    landuse_hatch = draw_records(
+        white, records, padded_bbox,
+        show_boundary=True, show_landuse=True, show_lines=True,
+        boundary_width=boundary_width, landuse_opacity=255, line_width=line_width,
+    )
+    return preview, satellite_base, landuse_hatch, padded_bbox
+
+
+def pil_to_png_bytes(img):
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def build_prompt(rows, site_area):
+    lines = [
+        "You are given two perfectly aligned images exported from a DXF urban planning drawing:",
+        "- Image 1: satellite_base.png = VWorld satellite/base image with exact site boundary.",
+        "- Image 2: landuse_hatch.png = land-use hatch map from the same DXF, same bbox and resolution.",
+        "",
+        "IMPORTANT: DXF metadata below is the authoritative source for layer names, RGB colors, and areas.",
+        "Infer land-use programs from the layer names when no explicit program is provided.",
+        "Use the images for geometry and visual alignment; use this metadata for semantic interpretation.",
+        "",
+        f"Total parsed land-use area: approximately {site_area:,.0f} sqm.",
+        "",
+        "LAND USE LAYER MAPPING:",
+    ]
+    for r in rows:
+        if not r.get("enabled", True):
+            continue
+        program = r.get("program") or guess_program_from_layer(r["layer"])
+        lines.append(f"- Layer '{r['layer']}' / {r.get('rgb','')} / Area ~{r.get('area_sqm',0):,.0f} sqm → {program}")
+    lines += [
+        "",
+        "CORE LOCKS:",
+        "- Preserve the site boundary exactly.",
+        "- Preserve roads, parcels, land-use hatch geometry, and internal planning lines exactly.",
+        "- Do not change or invent geometry outside the site boundary.",
+        "- Remove all flat zoning colors in final render; convert each layer into real physical architecture or landscape.",
+        "- Roofs must use real systems only: green roofs, solar panels, HVAC, skylights, concrete, metal, or glass.",
+        "",
+        "OUTPUT TARGET:",
+        "A photorealistic Korean urban development aerial masterplan that blends seamlessly with the satellite context.",
+    ]
+    return "\n".join(lines)
+
+
+
 # ──────────────────────────────────────────────────────────────
 # DXF 색상 추출
 # ──────────────────────────────────────────────────────────────
 def aci_to_rgb(aci: int):
-    aci_map = {
-        1: (255, 0, 0),
-        2: (255, 255, 0),
-        3: (0, 255, 0),
-        4: (0, 255, 255),
-        5: (0, 0, 255),
-        6: (255, 0, 255),
-        7: (255, 255, 255),
-        8: (128, 128, 128),
-        9: (192, 192, 192),
-    }
-    return aci_map.get(int(aci), (180, 180, 180))
+    """
+    CAD ACI 색상 전체를 RGB로 변환합니다.
+    기존 단순 매핑은 ACI 1~9만 처리해서 대부분의 해치가 회색으로 표시되는 문제가 있었습니다.
+    """
+    try:
+        rgb = aci2rgb(int(aci))
+        return (int(rgb.r), int(rgb.g), int(rgb.b))
+    except Exception:
+        aci_map = {
+            1: (255, 0, 0),
+            2: (255, 255, 0),
+            3: (0, 255, 0),
+            4: (0, 255, 255),
+            5: (0, 0, 255),
+            6: (255, 0, 255),
+            7: (255, 255, 255),
+            8: (128, 128, 128),
+            9: (192, 192, 192),
+        }
+        return aci_map.get(int(aci), (180, 180, 180))
 
 
 def true_color_to_rgb(true_color: int):
@@ -457,21 +1423,21 @@ def extract_dxf_layer_colors(dxf_bytes: bytes) -> list:
 # DXF → PNG 렌더링
 # ──────────────────────────────────────────────────────────────
 def is_landuse_layer(layer_name: str) -> bool:
-    name = layer_name.lower()
-    exclude = ["구역계", "계획선", "획지선", "boundary", "line"]
-    if any(k in name for k in exclude):
+    n = clean_layer_name(layer_name)
+    if is_boundary_layer(layer_name) or is_plan_line_layer(layer_name):
         return False
-    return (
-        "h_" in name or "h." in name or
-        "공원" in name or "녹지" in name or "도로" in name or
-        "상업" in name or "산업" in name or "복합" in name or
-        "주차" in name or "하천" in name or "주거" in name
-    )
+    keys = [
+        "h공원", "h녹지", "h도로", "h도시지원시설", "h보행자전용도로",
+        "h복합용지", "h산업", "h산업복합", "h산업지원시설", "h소하천", "h주차장",
+        "공원", "녹지", "도로", "도시지원시설", "복합", "산업", "상업", "주차",
+        "하천", "수변", "주거", "공동주택", "단독주택", "지원시설", "업무", "상업시설"
+    ]
+    return any(k in n for k in keys)
 
 
 def is_boundary_layer(layer_name: str) -> bool:
-    name = layer_name.lower()
-    return "구역계" in name or "boundary" in name
+    n = clean_layer_name(layer_name)
+    return "구역계" in n or "boundary" in n or "사업대상지" in n
 
 
 def dxf_rgb_for_entity(doc, e):
@@ -1263,10 +2229,55 @@ def render_selector(outputs, sel_key, label):
                     st.rerun()
     return outputs[st.session_state[sel_key]]
 
+
+# ──────────────────────────────────────────────────────────────
+# DXF 추출 결과 → 기존 토지이용표 연결 유틸
+# ──────────────────────────────────────────────────────────────
+def parse_rgb_text(rgb_text: str):
+    m = re.search(r"RGB\((\d+),\s*(\d+),\s*(\d+)\)", str(rgb_text))
+    if not m:
+        return 180, 180, 180
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
+def dxf_rows_to_landuse_table(rows: list) -> list:
+    out = []
+    for row in rows:
+        layer = str(row.get("layer", "")).strip()
+        r, g, b = parse_rgb_text(row.get("rgb", ""))
+        preset, custom_desc = guess_preset_from_layer(layer)
+        area = float(row.get("area_sqm", 0.0) or 0.0)
+        out.append({
+            "layer": layer,
+            "name": layer,
+            "r": r,
+            "g": g,
+            "b": b,
+            "hex": "#%02X%02X%02X" % (r, g, b),
+            "preset": preset,
+            "custom_desc": custom_desc,
+            "area_sqm": area,
+            "tolerance": 20,
+            "enabled": bool(row.get("enabled", True)),
+            "entity_count": int(row.get("entity_count", 0) or 0),
+        })
+    return out
+
+
+def reset_generated_images():
+    st.session_state.pass1_outputs = []
+    st.session_state.pass1_selected_idx = 0
+    st.session_state.pass1_output_bytes = None
+    st.session_state.pass2_outputs = []
+    st.session_state.pass2_selected_idx = 0
+    st.session_state.pass2_output_bytes = None
+    st.session_state.pass3_outputs = []
+    st.session_state.pass3_selected_idx = 0
+
 # ──────────────────────────────────────────────────────────────
 # 상단 네비게이션
 # ──────────────────────────────────────────────────────────────
-STEPS = ["① DXF 입력·지도 확인", "② 레이어·프롬프트 확인", "③ 조감도 생성"]
+STEPS = ["① DXF 입력·PNG 생성", "② 레이어·프롬프트 확인", "③ 조감도 생성"]
 cur_step = st.session_state.step
 
 cols_nav = st.columns(len(STEPS))
@@ -1312,14 +2323,30 @@ if st.session_state._errors:
     st.session_state._errors = []
 
 # ══════════════════════════════════════════════════════════════
-# STEP 0: 이미지 입력
+# STEP 0: DXF 입력 + VWorld 기반 PNG 2장 생성
 # ══════════════════════════════════════════════════════════════
 if cur_step == 0:
-    st.markdown('<div class="section-header">① DXF 입력·지도 확인</div>', unsafe_allow_html=True)
-    st.caption("DXF 1개를 업로드하면 구역계·토지이용해치·계획선을 확인하고 조감도 입력용 PNG 2장을 추출합니다.")
+    st.markdown('<div class="section-header">① DXF 입력·PNG 생성</div>', unsafe_allow_html=True)
+    st.caption(
+        "DXF를 업로드하면 VWorld 위성백판 위에서 구역계·토지이용해치를 확인하고, "
+        "조감도 생성에 필요한 satellite_base.png와 landuse_hatch.png 2장을 같은 화면에서 생성합니다."
+    )
 
+    missing = []
     if not EZDXF_AVAILABLE:
-        st.error("ezdxf 패키지가 필요합니다: pip install ezdxf")
+        missing.append("ezdxf")
+    if not PYPROJ_AVAILABLE:
+        missing.append("pyproj")
+    if not REQUESTS_AVAILABLE:
+        missing.append("requests")
+    if st_folium is None:
+        missing.append("streamlit-folium")
+    if folium is None:
+        missing.append("folium")
+
+    if missing:
+        st.error("필수 패키지가 없습니다: " + ", ".join(missing))
+        st.code("pip install ezdxf pyproj requests folium streamlit-folium google-genai opencv-python openpyxl", language="bash")
         st.stop()
 
     dxf_file = st.file_uploader(
@@ -1327,76 +2354,125 @@ if cur_step == 0:
         type=["dxf"],
         key="up_dxf_main"
     )
+
+    c_opt1, c_opt2 = st.columns([1.3, 1])
+    with c_opt1:
+        crs_label = st.selectbox(
+            "DXF 좌표계",
+            list(CRS_OPTIONS.keys()),
+            index=0,
+            help="대부분 구 한국측지계 CAD는 EPSG:5174인 경우가 많습니다."
+        )
+        src_epsg = CRS_OPTIONS[crs_label]
+    with c_opt2:
+        img_size_label = st.selectbox("PNG 출력 크기", list(IMG_SIZE_OPTIONS.keys()), index=2)
+        out_w, out_h = IMG_SIZE_OPTIONS[img_size_label]
+
+    export_zoom = st.slider(
+        "VWorld 위성 타일 줌 레벨",
+        min_value=16,
+        max_value=20,
+        value=DEFAULT_EXPORT_ZOOM,
+        step=1,
+        help="19 권장. 너무 높이면 일부 지역에서 타일 누락 또는 속도 저하가 있을 수 있습니다."
+    )
+
+    st.markdown('<div class="sub-label">계획부지 전체 면적</div>', unsafe_allow_html=True)
+    st.session_state.site_area_sqm = st.number_input(
+        "계획부지 전체면적 (㎡)",
+        min_value=1.0,
+        value=float(st.session_state.site_area_sqm),
+        step=1000.0,
+        format="%.0f",
+    )
+
     if dxf_file:
         raw = dxf_file.getvalue()
         if raw != st.session_state.dxf_bytes:
             st.session_state.dxf_bytes = raw
             st.session_state["_auto_generated"] = False
-            rows = extract_dxf_layer_colors(raw)
-            st.session_state.dxf_layer_table = rows
+            st.session_state.dxf_rows = []
+            st.session_state.dxf_layer_table = []
+            st.session_state.land_use_table = []
+            st.session_state.records = []
+            st.session_state.dxf_geojson = None
+            st.session_state.gdal_geojson = None
+            st.session_state.bbox_3857 = None
+            st.session_state.preview_png = None
+            st.session_state.satellite_base_png = None
+            st.session_state.landuse_hatch_png = None
             st.session_state.dxf_satellite_base_bytes = None
             st.session_state.dxf_landuse_hatch_bytes = None
-            if rows:
-                st.session_state.land_use_table = [
-                    {
-                        "layer": r["layer"], "name": r["name"],
-                        "r": r["r"], "g": r["g"], "b": r["b"],
-                        "preset": r["preset"], "custom_desc": r["custom_desc"],
-                        "area_sqm": r.get("area_sqm", 0.0),
-                        "tolerance": r.get("tolerance", 20),
-                        "enabled": r.get("enabled", True),
-                    }
-                    for r in rows
-                ]
-                st.session_state["_auto_generated"] = True
+            st.session_state.img_sat_bytes = None
+            st.session_state.img_landuse_bytes = None
+            reset_generated_images()
 
-    st.markdown('<div class="sub-label">계획부지 전체 면적</div>', unsafe_allow_html=True)
-    st.session_state.site_area_sqm = st.number_input(
-        "계획부지 전체면적 (㎡)", min_value=1.0,
-        value=float(st.session_state.site_area_sqm),
-        step=1000.0, format="%.0f"
-    )
+            try:
+                with st.spinner("DXF를 GIS geometry로 변환하고 레이어/RGB/면적을 계산하는 중..."):
+                    gj = dxf_to_geojson_by_gdal(raw, src_epsg)
+                    records, bbox = records_from_gdal_geojson(gj, raw, src_epsg)
+                    area_map = compute_hatch_area_by_layer(raw)
+                    rows = build_dxf_layer_table(records, area_map=area_map)
 
-    st.markdown('<div class="sub-label">위성백판 (선택)</div>', unsafe_allow_html=True)
-    sat_file = st.file_uploader(
-        "위성사진 업로드 — 없으면 흰 백판으로 생성",
-        type=["png", "jpg", "jpeg"],
-        key="up_sat_for_dxf"
-    )
-    if sat_file:
-        st.session_state.img_sat_bytes = sat_file.getvalue()
+                if not records or bbox is None:
+                    st.error("DXF에서 구역계/토지이용해치/계획선 geometry를 읽지 못했습니다. 레이어명과 좌표계를 확인하세요.")
+                else:
+                    st.session_state.gdal_geojson = gj
+                    st.session_state.records = records
+                    st.session_state.bbox_3857 = bbox
+                    st.session_state.dxf_rows = rows
+                    st.session_state.dxf_geojson = records_to_geojson(records)
+                    st.session_state.dxf_layer_table = dxf_rows_to_landuse_table(rows)
 
-    if st.session_state.dxf_bytes:
-        st.markdown('<div class="sub-label">지도 표시 옵션</div>', unsafe_allow_html=True)
-        oc1, oc2, oc3, oc4 = st.columns(4)
-        show_sat_bg     = oc1.checkbox("위성/백판",     value=True,  key="opt_sat")
-        show_boundary   = oc2.checkbox("구역계",        value=True,  key="opt_bdry")
-        show_landuse    = oc3.checkbox("토지이용해치",  value=True,  key="opt_lu")
-        show_plan_lines = oc4.checkbox("계획선/획지선", value=True,  key="opt_pl")
+                    total_area = sum(float(r.get("area_sqm", 0.0) or 0.0) for r in rows if r.get("enabled", True))
+                    if total_area > 0:
+                        st.session_state.site_area_sqm = total_area
 
-        preview_bytes = render_dxf_to_png(
-            st.session_state.dxf_bytes,
-            mode="preview",
-            show_boundary=show_boundary,
-            show_landuse=show_landuse,
-            show_plan_lines=show_plan_lines,
-            satellite_bytes=st.session_state.img_sat_bytes if show_sat_bg else None,
+                    st.session_state.land_use_table = [
+                        {
+                            "layer": r["layer"],
+                            "name": r["name"],
+                            "r": r["r"], "g": r["g"], "b": r["b"],
+                            "preset": r["preset"],
+                            "custom_desc": r["custom_desc"],
+                            "area_sqm": r.get("area_sqm", 0.0),
+                            "tolerance": r.get("tolerance", 20),
+                            "enabled": r.get("enabled", True),
+                        }
+                        for r in st.session_state.dxf_layer_table
+                    ]
+                    st.session_state["_auto_generated"] = True
+                    st.session_state.prompt_text = build_prompt(rows, total_area)
+                    st.success("DXF 파싱 완료. 아래에서 지도 확인 후 PNG 2장을 생성하세요.")
+            except Exception as e:
+                st.error("DXF 변환 오류: %s" % str(e))
+
+    if st.session_state.dxf_geojson:
+        st.markdown('<div class="sub-label">인터랙티브 지도 확인</div>', unsafe_allow_html=True)
+        mc1, mc2, mc3 = st.columns(3)
+        boundary_width = mc1.slider("구역계 두께", 1, 8, 4)
+        landuse_opacity = mc2.slider("토지이용해치 투명도", 0.05, 0.90, 0.45, 0.05)
+        line_width = mc3.slider("계획선/획지선 두께", 1, 5, 2)
+
+        show_interactive_map(
+            st.session_state.dxf_geojson,
+            zoom=DEFAULT_MAP_ZOOM,
+            boundary_width=boundary_width,
+            landuse_opacity=landuse_opacity,
+            line_width=line_width,
         )
-        if preview_bytes:
-            st.session_state.dxf_preview_bytes = preview_bytes
-            st.image(bytes_to_pil(preview_bytes),
-                     caption="DXF + 위성백판 미리보기", use_container_width=True)
 
         if st.session_state.dxf_layer_table:
-            st.markdown('<div class="sub-label">추출된 레이어</div>', unsafe_allow_html=True)
+            st.markdown('<div class="sub-label">추출된 레이어·RGB·면적</div>', unsafe_allow_html=True)
             st.dataframe(
                 [
                     {
+                        "사용": r.get("enabled", True),
                         "레이어": r["layer"],
                         "RGB": "%d,%d,%d" % (r["r"], r["g"], r["b"]),
-                        "HEX": r["hex"],
-                        "추정 프리셋": r["preset"],
-                        "객체수": r["entity_count"],
+                        "HEX": r.get("hex", ""),
+                        "면적(㎡)": r.get("area_sqm", 0.0),
+                        "추정 프리셋": r.get("preset", ""),
                     }
                     for r in st.session_state.dxf_layer_table
                 ],
@@ -1404,56 +2480,84 @@ if cur_step == 0:
             )
 
         st.markdown("---")
-        st.markdown("### 조감도 입력용 PNG 2장 추출")
-        st.caption("satellite_base: 위성/백판+구역계   ·   landuse_hatch: 흰백판+해치")
+        st.markdown("### 조감도 입력용 PNG 2장 생성")
+        st.caption("satellite_base: VWorld 위성백판 + 구역계 / landuse_hatch: 흰 백판 + 토지이용해치 + 계획선")
 
-        if st.button("PNG 2장 생성", type="primary"):
-            with st.spinner("렌더링 중..."):
-                sat_base = render_dxf_to_png(
-                    st.session_state.dxf_bytes,
-                    mode="satellite_base",
-                    satellite_bytes=st.session_state.img_sat_bytes,
-                )
-                landuse_hatch = render_dxf_to_png(
-                    st.session_state.dxf_bytes,
-                    mode="landuse_hatch",
-                    satellite_bytes=None,
-                )
-            st.session_state.dxf_satellite_base_bytes = sat_base
-            st.session_state.dxf_landuse_hatch_bytes = landuse_hatch
-            st.session_state.img_sat_bytes = sat_base
-            st.session_state.img_landuse_bytes = landuse_hatch
-            st.success("PNG 2장 생성 완료")
-            st.rerun()
+        if st.button("PNG 2장 생성", type="primary", use_container_width=True):
+            try:
+                with st.spinner("VWorld 위성 타일을 받아 PNG 2장을 생성하는 중..."):
+                    preview, sat_base, landuse_hatch, padded_bbox = make_exports(
+                        st.session_state.records,
+                        st.session_state.bbox_3857,
+                        VWORLD_API_KEY,
+                        export_zoom,
+                        out_w,
+                        out_h,
+                        show_boundary=True,
+                        show_landuse=True,
+                        show_lines=True,
+                        boundary_width=boundary_width,
+                        landuse_opacity=int(255 * landuse_opacity),
+                        line_width=line_width,
+                    )
+
+                st.session_state.preview_png = pil_to_png_bytes(preview)
+                st.session_state.satellite_base_png = pil_to_png_bytes(sat_base)
+                st.session_state.landuse_hatch_png = pil_to_png_bytes(landuse_hatch)
+                st.session_state.dxf_satellite_base_bytes = st.session_state.satellite_base_png
+                st.session_state.dxf_landuse_hatch_bytes = st.session_state.landuse_hatch_png
+                st.session_state.img_sat_bytes = st.session_state.satellite_base_png
+                st.session_state.img_landuse_bytes = st.session_state.landuse_hatch_png
+                st.session_state.export_bbox_3857 = padded_bbox
+                reset_generated_images()
+                st.success("PNG 2장 생성 완료. 바로 다음 단계로 이동할 수 있습니다.")
+                st.rerun()
+            except Exception as e:
+                st.error("PNG 생성 오류: %s" % str(e))
 
     if st.session_state.dxf_satellite_base_bytes and st.session_state.dxf_landuse_hatch_bytes:
         pa, pb = st.columns(2)
         with pa:
-            st.image(bytes_to_pil(st.session_state.dxf_satellite_base_bytes),
-                     caption="Image 1: satellite_base.png", use_container_width=True)
+            st.image(
+                bytes_to_pil(st.session_state.dxf_satellite_base_bytes),
+                caption="Image 1: satellite_base.png",
+                use_container_width=True
+            )
             st.download_button(
                 "⬇️ satellite_base.png",
                 data=st.session_state.dxf_satellite_base_bytes,
-                file_name="satellite_base.png", mime="image/png",
+                file_name="satellite_base.png",
+                mime="image/png",
+                use_container_width=True,
             )
         with pb:
-            st.image(bytes_to_pil(st.session_state.dxf_landuse_hatch_bytes),
-                     caption="Image 2: landuse_hatch.png", use_container_width=True)
+            st.image(
+                bytes_to_pil(st.session_state.dxf_landuse_hatch_bytes),
+                caption="Image 2: landuse_hatch.png",
+                use_container_width=True
+            )
             st.download_button(
                 "⬇️ landuse_hatch.png",
                 data=st.session_state.dxf_landuse_hatch_bytes,
-                file_name="landuse_hatch.png", mime="image/png",
+                file_name="landuse_hatch.png",
+                mime="image/png",
+                use_container_width=True,
             )
-        st.success("확인됨. '다음 ▶'으로 이동하세요.")
+
+        with st.expander("DXF 메타데이터 기반 프롬프트 초안", expanded=False):
+            st.code(st.session_state.prompt_text or "", language="text")
+
+        st.success("'다음 ▶'으로 이동하면 이 PNG 2장과 레이어 메타데이터가 그대로 조감도 생성 단계에 연결됩니다.")
     else:
         st.warning("DXF 업로드 후 'PNG 2장 생성'을 눌러야 다음 단계로 이동할 수 있습니다.")
+
 
 # ══════════════════════════════════════════════════════════════
 # STEP 1: 토지이용계획표
 # ══════════════════════════════════════════════════════════════
 elif cur_step == 1:
     st.markdown('<div class="section-header">② 레이어·프롬프트 확인</div>', unsafe_allow_html=True)
-    st.caption("DXF에서 파싱된 레이어명, RGB, 면적, 용도 추정값을 확인·수정합니다.")
+    st.caption("STEP ①에서 파싱된 레이어명, RGB, 면적, 용도 추정값을 확인·수정합니다.")
 
     if st.button("색상/면적 다시 계산", type="secondary"):
         st.session_state["_auto_generated"] = False
@@ -1756,7 +2860,7 @@ else:
         st.stop()
 
     if not st.session_state.dxf_landuse_hatch_bytes:
-        st.error("DXF 기반 landuse_hatch.png가 없습니다. STEP ①에서 PNG 2장을 먼저 생성하세요.")
+        st.error("landuse_hatch.png가 없습니다. STEP ①에서 DXF를 업로드하고 PNG 2장을 먼저 생성하세요.")
         st.stop()
 
     # DXF 기반 입력을 생성 파이프라인에 주입
