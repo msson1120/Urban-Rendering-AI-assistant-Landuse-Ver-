@@ -411,7 +411,13 @@ IMG_SIZE_OPTIONS = {
 
 # VWorld WMTS/TMS tile URL pattern.
 # Satellite uses jpeg; Base/Hybrid use png in most examples.
-VWORLD_API_KEY = "05CD1D67-6203-3E82-BFDA-BBC5DE6AA857"
+DEFAULT_VWORLD_API_KEY = "05CD1D67-6203-3E82-BFDA-BBC5DE6AA857"
+
+def get_vworld_api_key():
+    try:
+        return st.secrets.get("VWORLD_API_KEY", DEFAULT_VWORLD_API_KEY)
+    except Exception:
+        return DEFAULT_VWORLD_API_KEY
 VWORLD_SAT_URL = "https://api.vworld.kr/req/wmts/1.0.0/{key}/Satellite/{z}/{y}/{x}.jpeg"
 VWORLD_BASE_URL = "https://api.vworld.kr/req/wmts/1.0.0/{key}/Base/{z}/{y}/{x}.png"
 
@@ -524,7 +530,10 @@ def find_ogr2ogr():
     exe = shutil.which("ogr2ogr")
     if exe:
         return exe
+
     candidates = [
+        "/usr/bin/ogr2ogr",
+        "/usr/local/bin/ogr2ogr",
         r"C:\Program Files\QGIS 3.44.1\bin\ogr2ogr.exe",
         r"C:\Program Files\QGIS 3.44.0\bin\ogr2ogr.exe",
         r"C:\Program Files\QGIS 3.40.0\bin\ogr2ogr.exe",
@@ -533,11 +542,12 @@ def find_ogr2ogr():
         r"C:\Program Files\QGIS 3.34.0\bin\ogr2ogr.exe",
         r"C:\OSGeo4W\bin\ogr2ogr.exe",
     ]
+
     for p in candidates:
         if os.path.exists(p):
             return p
 
-    # QGIS 버전 폴더 자동 스캔
+    # QGIS 버전 폴더 자동 스캔 (Windows 전용)
     qgis_root = r"C:\Program Files"
     try:
         for name in os.listdir(qgis_root):
@@ -549,8 +559,9 @@ def find_ogr2ogr():
         pass
 
     raise RuntimeError(
-        "ogr2ogr.exe를 자동으로 찾지 못했습니다. "
-        "QGIS가 C:\\Program Files\\QGIS x.xx.x 경로에 설치되어 있는지 확인하세요."
+        "ogr2ogr 실행 파일을 찾지 못했습니다. "
+        "Streamlit Cloud라면 GitHub 루트에 packages.txt를 만들고 gdal-bin을 추가하세요. "
+        "로컬 Windows라면 QGIS 또는 OSGeo4W 설치가 필요합니다."
     )
 
 
@@ -872,17 +883,32 @@ def tile_bounds_mercator(x, y, z):
 def fetch_vworld_tile(key, z, x, y, layer="Satellite"):
     if not REQUESTS_AVAILABLE or not key:
         return None
+
     if layer == "Satellite":
         url = VWORLD_SAT_URL.format(key=key, z=z, x=x, y=y)
     else:
         url = VWORLD_BASE_URL.format(key=key, z=z, x=x, y=y)
+
     try:
-        resp = requests.get(url, timeout=8, headers={"User-Agent":"PlanVision/1.0"})
-        if resp.status_code == 200 and resp.content:
+        resp = requests.get(
+            url,
+            timeout=10,
+            headers={"User-Agent": "Mozilla/5.0 PlanVision/1.0"}
+        )
+
+        content_type = resp.headers.get("Content-Type", "")
+
+        if resp.status_code == 200 and resp.content and "image" in content_type.lower():
             return Image.open(BytesIO(resp.content)).convert("RGB")
-    except Exception:
+
+        st.session_state["vworld_last_error"] = (
+            f"status={resp.status_code}, content-type={content_type}, url={url}"
+        )
         return None
-    return None
+
+    except Exception as e:
+        st.session_state["vworld_last_error"] = str(e)
+        return None
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
@@ -942,15 +968,34 @@ def make_satellite_mosaic(bbox3857, key, z=18, width=1600, height=1200, padding_
 
     mosaic = Image.new("RGB", (mosaic_w, mosaic_h), (245, 245, 245))
 
+    success_tiles = 0
+    failed_tiles = 0
+
     for tx in range(tx_min, tx_max + 1):
         for ty in range(ty_min, ty_max + 1):
             tile = fetch_vworld_tile_cached(key, z, tx, ty, layer="Satellite")
+
             if tile is None:
+                failed_tiles += 1
                 tile = Image.new("RGB", (tile_size, tile_size), (235, 235, 235))
+            else:
+                success_tiles += 1
+
             mosaic.paste(tile.resize((tile_size, tile_size)), (
                 (tx - tx_min) * tile_size,
                 (ty - ty_min) * tile_size,
             ))
+
+    st.session_state["vworld_success_tiles"] = success_tiles
+    st.session_state["vworld_failed_tiles"] = failed_tiles
+
+    if success_tiles == 0:
+        last_error = st.session_state.get("vworld_last_error", "원인 정보 없음")
+        raise RuntimeError(
+            "VWorld 위성 타일을 1장도 받아오지 못했습니다. "
+            "API Key, 서비스 URL/도메인 제한, 네트워크 접근을 확인하세요. "
+            f"마지막 오류: {last_error}"
+        )
 
     full_minx, full_miny, _, _ = tile_bounds_mercator(tx_min, ty_max, z)
     _, _, full_maxx, full_maxy = tile_bounds_mercator(tx_max, ty_min, z)
@@ -1070,7 +1115,7 @@ def show_interactive_map(
     )
 
     folium.TileLayer(
-        tiles=f"https://api.vworld.kr/req/wmts/1.0.0/{VWORLD_API_KEY}/Satellite/{{z}}/{{y}}/{{x}}.jpeg",
+        tiles=f"https://api.vworld.kr/req/wmts/1.0.0/{get_vworld_api_key()}/Satellite/{{z}}/{{y}}/{{x}}.jpeg",
         attr="VWorld",
         name="VWorld Satellite",
         overlay=False,
@@ -2489,7 +2534,7 @@ if cur_step == 0:
                     preview, sat_base, landuse_hatch, padded_bbox = make_exports(
                         st.session_state.records,
                         st.session_state.bbox_3857,
-                        VWORLD_API_KEY,
+                        get_vworld_api_key(),
                         export_zoom,
                         out_w,
                         out_h,
