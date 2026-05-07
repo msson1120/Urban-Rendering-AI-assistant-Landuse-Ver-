@@ -1,7 +1,11 @@
 streamlit
-Pillow
-google-genai>=0.3.0
-opencv-python-headless
-numpy
-openpyxl
 ezdxf
+pyproj
+requests
+folium
+streamlit-folium
+google-genai
+opencv-python
+openpyxl
+pillow
+numpy
